@@ -35,7 +35,7 @@ defmodule SymphonyElixir.SSH do
 
   @spec remote_shell_command(String.t(), atom()) :: String.t()
   def remote_shell_command(command, :windows) when is_binary(command) do
-    "cmd.exe /d /s /c " <> windows_cmd_escape(command)
+    "cmd.exe /v:on /d /s /c " <> windows_cmd_escape(command)
   end
 
   def remote_shell_command(command, _platform) when is_binary(command) do
@@ -110,15 +110,6 @@ defmodule SymphonyElixir.SSH do
   end
 
   defp windows_cmd_escape(value) when is_binary(value) do
-    escaped =
-      value
-      |> String.replace("^", "^^")
-      |> String.replace("&", "^&")
-      |> String.replace("|", "^|")
-      |> String.replace("<", "^<")
-      |> String.replace(">", "^>")
-      |> String.replace("\"", "\\\"")
-
-    "\"" <> escaped <> "\""
+    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
 end

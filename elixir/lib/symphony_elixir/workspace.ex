@@ -491,15 +491,16 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_prepare_script(workspace, :windows) do
+    workspace_path = windows_cmd_value(workspace)
+
     [
-      "set \"workspace=#{windows_cmd_value(workspace)}\"",
-      "set \"created=0\"",
-      "if not exist \"%workspace%\\\" (mkdir \"%workspace%\" && set \"created=1\")",
-      "if not exist \"%workspace%\\\" exit /b 1",
-      "cd /d \"%workspace%\" || exit /b 1",
-      "for %I in (.) do @echo #{@remote_workspace_marker}	%created%	%~fI"
+      "set created=0",
+      "(if not exist #{workspace_path} (mkdir #{workspace_path} & set created=1))",
+      "(if not exist #{workspace_path} exit /b 1)",
+      "(cd /d #{workspace_path} || exit /b 1)",
+      "for %I in (.) do @echo #{@remote_workspace_marker}\t!created!\t%~fI"
     ]
-    |> Enum.join(" && ")
+    |> Enum.join("& ")
   end
 
   defp workspace_prepare_script(workspace, _platform) do

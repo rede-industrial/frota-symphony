@@ -1655,7 +1655,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WIN", "vitoria")
 
       trace = File.read!(trace_file)
-      assert trace =~ "vitoria cmd.exe /d /s /c"
+      assert trace =~ "vitoria cmd.exe /v:on /d /s /c"
+      assert trace =~ "(if not exist"
+      assert trace =~ "!created!"
+      refute trace =~ "%workspace%"
       assert trace =~ "C:\\FROTA\\workspace"
       assert trace =~ "MT-SSH-WIN"
       assert trace =~ "echo before-run"
