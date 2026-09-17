@@ -1598,6 +1598,75 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
+  test "remote windows workspace lifecycle uses cmd shell when configured" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-remote-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "C:\\FROTA\\workspace"
+      workspace_path = "C:\\FROTA\\workspace\\MT-SSH-WIN"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"__SYMPHONY_WORKSPACE__"*)
+          printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+          ;;
+      esac
+
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"},
+        hook_before_run: "echo before-run",
+        hook_after_run: "echo after-run",
+        hook_before_remove: "echo before-remove"
+      )
+
+      assert Config.settings!().worker.platforms == %{"vitoria" => "windows"}
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WIN", "vitoria")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "vitoria cmd.exe /d /s /c"
+      assert trace =~ "C:\\FROTA\\workspace"
+      assert trace =~ "MT-SSH-WIN"
+      assert trace =~ "echo before-run"
+      assert trace =~ "echo after-run"
+      assert trace =~ "echo before-remove"
+      refute trace =~ "bash -lc"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "remote workspace lifecycle uses ssh host aliases from worker config" do
     test_root =
       Path.join(

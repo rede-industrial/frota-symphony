@@ -4,7 +4,8 @@ defmodule SymphonyElixir.SSH do
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+      {remote_platform, cmd_opts} = Keyword.pop(opts, :remote_platform, :posix)
+      {:ok, System.cmd(executable, ssh_args(host, command, remote_platform), cmd_opts)}
     end
   end
 
@@ -12,13 +13,14 @@ defmodule SymphonyElixir.SSH do
   def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
       line_bytes = Keyword.get(opts, :line)
+      remote_platform = Keyword.get(opts, :remote_platform, :posix)
 
       port_opts =
         [
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
+          args: Enum.map(ssh_args(host, command, remote_platform), &String.to_charlist/1)
         ]
         |> maybe_put_line_option(line_bytes)
 
@@ -31,6 +33,15 @@ defmodule SymphonyElixir.SSH do
     "bash -lc " <> shell_escape(command)
   end
 
+  @spec remote_shell_command(String.t(), atom()) :: String.t()
+  def remote_shell_command(command, :windows) when is_binary(command) do
+    "cmd.exe /d /s /c " <> windows_cmd_escape(command)
+  end
+
+  def remote_shell_command(command, _platform) when is_binary(command) do
+    remote_shell_command(command)
+  end
+
   defp ssh_executable do
     case System.find_executable("ssh") do
       nil -> {:error, :ssh_not_found}
@@ -38,14 +49,14 @@ defmodule SymphonyElixir.SSH do
     end
   end
 
-  defp ssh_args(host, command) do
+  defp ssh_args(host, command, remote_platform) do
     %{destination: destination, port: port} = parse_target(host)
 
     []
     |> maybe_put_config()
     |> Kernel.++(["-T"])
     |> maybe_put_port(port)
-    |> Kernel.++([destination, remote_shell_command(command)])
+    |> Kernel.++([destination, remote_shell_command(command, remote_platform)])
   end
 
   defp maybe_put_line_option(port_opts, nil), do: port_opts
@@ -96,5 +107,18 @@ defmodule SymphonyElixir.SSH do
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  end
+
+  defp windows_cmd_escape(value) when is_binary(value) do
+    escaped =
+      value
+      |> String.replace("^", "^^")
+      |> String.replace("&", "^&")
+      |> String.replace("|", "^|")
+      |> String.replace("<", "^<")
+      |> String.replace(">", "^>")
+      |> String.replace("\"", "\\\"")
+
+    "\"" <> escaped <> "\""
   end
 end

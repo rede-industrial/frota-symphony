@@ -214,8 +214,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
+    remote_platform = worker_platform(worker_host)
+    remote_command = remote_launch_command(workspace, dynamic_tool_binding, remote_platform)
+    SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: remote_platform)
   end
 
   defp local_launch_command(dynamic_tool_binding) do
@@ -227,7 +228,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.join(" && ")
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding) when is_binary(workspace) do
+  defp remote_launch_command(workspace, dynamic_tool_binding, :windows) when is_binary(workspace) do
+    [
+      "cd /d \"#{windows_cmd_value(workspace)}\"",
+      tracker_secret_unset_command(dynamic_tool_binding, :windows),
+      Config.settings!().codex.command
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" && ")
+  end
+
+  defp remote_launch_command(workspace, dynamic_tool_binding, _platform) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
       tracker_secret_unset_command(dynamic_tool_binding),
@@ -243,7 +254,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.map(fn name -> {String.to_charlist(name), false} end)
   end
 
-  defp tracker_secret_unset_command(dynamic_tool_binding) do
+  defp tracker_secret_unset_command(dynamic_tool_binding), do: tracker_secret_unset_command(dynamic_tool_binding, :posix)
+
+  defp tracker_secret_unset_command(dynamic_tool_binding, :windows) do
+    case dynamic_tool_binding.secret_environment_names |> valid_environment_names() do
+      [] -> nil
+      names -> Enum.map_join(names, " && ", &"set \"#{&1}=\"")
+    end
+  end
+
+  defp tracker_secret_unset_command(dynamic_tool_binding, _platform) do
     case dynamic_tool_binding.secret_environment_names |> valid_environment_names() do
       [] -> nil
       names -> "unset " <> Enum.join(names, " ")
@@ -999,6 +1019,36 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_set_usage(metadata, _payload), do: metadata
+
+  defp worker_platform(worker_host) when is_binary(worker_host) do
+    Config.settings!().worker.platforms
+    |> Map.get(worker_host)
+    |> normalize_worker_platform()
+  end
+
+  defp normalize_worker_platform(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+    |> case do
+      "windows" -> :windows
+      "win32" -> :windows
+      _ -> :posix
+    end
+  end
+
+  defp normalize_worker_platform(_value), do: :posix
+
+  defp windows_cmd_value(value) when is_binary(value) do
+    value
+    |> String.replace("%", "%%")
+    |> String.replace("^", "^^")
+    |> String.replace("&", "^&")
+    |> String.replace("|", "^|")
+    |> String.replace("<", "^<")
+    |> String.replace(">", "^>")
+    |> String.replace("\"", "\\\"")
+  end
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

@@ -130,14 +130,44 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:ssh_hosts, {:array, :string}, default: [])
       field(:max_concurrent_agents_per_host, :integer)
+      field(:platforms, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host], empty_values: [])
+      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host, :platforms], empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
+      |> validate_change(:platforms, fn :platforms, platforms ->
+        invalid =
+          platforms
+          |> Enum.reject(fn {host, platform} ->
+            is_binary(host) and normalize_platform(platform) in [:posix, :windows]
+          end)
+
+        if invalid == [] do
+          []
+        else
+          [platforms: "must map worker host aliases to posix or windows"]
+        end
+      end)
     end
+
+    defp normalize_platform(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> String.downcase()
+      |> case do
+        "windows" -> :windows
+        "win32" -> :windows
+        "posix" -> :posix
+        "linux" -> :posix
+        "unix" -> :posix
+        _ -> :unknown
+      end
+    end
+
+    defp normalize_platform(_value), do: :unknown
   end
 
   defmodule Agent do

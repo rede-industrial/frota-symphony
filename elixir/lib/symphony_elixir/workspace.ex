@@ -52,25 +52,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ensure_workspace(workspace, worker_host) when is_binary(worker_host) do
-    script =
-      [
-        "set -eu",
-        remote_shell_assign("workspace", workspace),
-        "if [ -d \"$workspace\" ]; then",
-        "  created=0",
-        "elif [ -e \"$workspace\" ]; then",
-        "  rm -rf \"$workspace\"",
-        "  mkdir -p \"$workspace\"",
-        "  created=1",
-        "else",
-        "  mkdir -p \"$workspace\"",
-        "  created=1",
-        "fi",
-        "cd \"$workspace\"",
-        "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$(pwd -P)\""
-      ]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n")
+    script = workspace_prepare_script(workspace, worker_platform(worker_host))
 
     case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
       {:ok, {output, 0}} ->
@@ -113,12 +95,7 @@ defmodule SymphonyElixir.Workspace do
   def remove(workspace, worker_host) when is_binary(worker_host) do
     maybe_run_before_remove_hook(workspace, worker_host)
 
-    script =
-      [
-        remote_shell_assign("workspace", workspace),
-        "rm -rf \"$workspace\""
-      ]
-      |> Enum.join("\n")
+    script = remove_workspace_script(workspace, worker_platform(worker_host))
 
     case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
       {:ok, {_output, 0}} ->
@@ -317,7 +294,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp cleanup_failed_new_workspace(workspace, true, worker_host) when is_binary(worker_host) do
-    script = [remote_shell_assign("workspace", workspace), "rm -rf \"$workspace\""] |> Enum.join("\n")
+    script = remove_workspace_script(workspace, worker_platform(worker_host))
 
     case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
       {:ok, {_output, 0}} ->
@@ -361,15 +338,7 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       command ->
-        script =
-          [
-            remote_shell_assign("workspace", workspace),
-            "if [ -d \"$workspace\" ]; then",
-            "  cd \"$workspace\"",
-            "  #{command}",
-            "fi"
-          ]
-          |> Enum.join("\n")
+        script = before_remove_hook_script(command, workspace, worker_platform(worker_host))
 
         run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
         |> case do
@@ -422,7 +391,7 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
+    case run_remote_command(worker_host, hook_script(command, workspace, worker_platform(worker_host)), timeout_ms) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -521,6 +490,100 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.join("\n")
   end
 
+  defp workspace_prepare_script(workspace, :windows) do
+    [
+      "set \"workspace=#{windows_cmd_value(workspace)}\"",
+      "set \"created=0\"",
+      "if not exist \"%workspace%\\\" (mkdir \"%workspace%\" && set \"created=1\")",
+      "if not exist \"%workspace%\\\" exit /b 1",
+      "cd /d \"%workspace%\" || exit /b 1",
+      "for %I in (.) do @echo #{@remote_workspace_marker}	%created%	%~fI"
+    ]
+    |> Enum.join(" && ")
+  end
+
+  defp workspace_prepare_script(workspace, _platform) do
+    [
+      "set -eu",
+      remote_shell_assign("workspace", workspace),
+      "if [ -d \"$workspace\" ]; then",
+      "  created=0",
+      "elif [ -e \"$workspace\" ]; then",
+      "  rm -rf \"$workspace\"",
+      "  mkdir -p \"$workspace\"",
+      "  created=1",
+      "else",
+      "  mkdir -p \"$workspace\"",
+      "  created=1",
+      "fi",
+      "cd \"$workspace\"",
+      "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$(pwd -P)\""
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp remove_workspace_script(workspace, :windows) do
+    "if exist \"#{windows_cmd_value(workspace)}\\\" rmdir /s /q \"#{windows_cmd_value(workspace)}\""
+  end
+
+  defp remove_workspace_script(workspace, _platform) do
+    [remote_shell_assign("workspace", workspace), "rm -rf \"$workspace\""] |> Enum.join("\n")
+  end
+
+  defp before_remove_hook_script(command, workspace, :windows) do
+    "if exist \"#{windows_cmd_value(workspace)}\\\" (cd /d \"#{windows_cmd_value(workspace)}\" && #{command})"
+  end
+
+  defp before_remove_hook_script(command, workspace, _platform) do
+    [
+      remote_shell_assign("workspace", workspace),
+      "if [ -d \"$workspace\" ]; then",
+      "  cd \"$workspace\"",
+      "  #{command}",
+      "fi"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp hook_script(command, workspace, :windows) do
+    "cd /d \"#{windows_cmd_value(workspace)}\" && #{command}"
+  end
+
+  defp hook_script(command, workspace, _platform) do
+    "cd #{shell_escape(workspace)} && #{command}"
+  end
+
+  defp worker_platform(worker_host) when is_binary(worker_host) do
+    Config.settings!().worker.platforms
+    |> Map.get(worker_host)
+    |> normalize_worker_platform()
+  end
+
+  defp normalize_worker_platform(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+    |> case do
+      "windows" -> :windows
+      "win32" -> :windows
+      _ -> :posix
+    end
+  end
+
+  defp normalize_worker_platform(_value), do: :posix
+
+  defp windows_cmd_value(value) when is_binary(value) do
+    value
+    |> String.replace("%", "%%")
+    |> String.replace("^", "^^")
+    |> String.replace("&", "^&")
+    |> String.replace("|", "^|")
+    |> String.replace("<", "^<")
+    |> String.replace(">", "^>")
+    |> String.replace("\"", "\\\"")
+  end
+
   defp parse_remote_workspace_output(output) do
     lines = String.split(IO.iodata_to_binary(output), "\n", trim: true)
 
@@ -548,7 +611,7 @@ defmodule SymphonyElixir.Workspace do
        when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->
-        SSH.run(worker_host, script, stderr_to_stdout: true)
+        SSH.run(worker_host, script, stderr_to_stdout: true, remote_platform: worker_platform(worker_host))
       end)
 
     case Task.yield(task, timeout_ms) do
