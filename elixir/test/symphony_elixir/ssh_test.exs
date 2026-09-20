@@ -162,6 +162,24 @@ defmodule SymphonyElixir.SSHTest do
              "bash -lc 'printf '\"'\"'hello'\"'\"''"
   end
 
+  test "remote_shell_command/2 wraps windows commands in PowerShell encoded command" do
+    command = "Set-Location -LiteralPath 'C:\\FROTA\\workspace with spaces'; echo ok"
+
+    shell = SSH.remote_shell_command(command, :windows)
+
+    assert shell =~ "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+    refute shell =~ command
+
+    encoded =
+      shell
+      |> String.split(" -EncodedCommand ", parts: 2)
+      |> List.last()
+
+    assert encoded
+           |> Base.decode64!()
+           |> :unicode.characters_to_binary({:utf16, :little}, :utf8) == command
+  end
+
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do
     fake_bin_dir = Path.join(test_root, "bin")
     fake_ssh = Path.join(fake_bin_dir, "ssh")

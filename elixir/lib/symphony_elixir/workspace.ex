@@ -491,16 +491,19 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_prepare_script(workspace, :windows) do
-    workspace_path = windows_cmd_value(workspace)
+    escaped_workspace = powershell_single_quote(workspace)
 
     [
-      "set created=0",
-      "(if not exist #{workspace_path} (mkdir #{workspace_path} & set created=1))",
-      "(if not exist #{workspace_path} exit /b 1)",
-      "(cd /d #{workspace_path} || exit /b 1)",
-      "for %I in (.) do @echo #{@remote_workspace_marker}\t!created!\t%~fI"
+      "$ErrorActionPreference = 'Stop'",
+      "$workspace = #{escaped_workspace}",
+      "$created = '0'",
+      "if (Test-Path -LiteralPath $workspace -PathType Leaf) { Remove-Item -LiteralPath $workspace -Force }",
+      "if (-not (Test-Path -LiteralPath $workspace -PathType Container)) { New-Item -ItemType Directory -Force -Path $workspace | Out-Null; $created = '1' }",
+      "$resolved = (Resolve-Path -LiteralPath $workspace).Path",
+      "Set-Location -LiteralPath $resolved",
+      "Write-Output ('#{@remote_workspace_marker}' + [char]9 + $created + [char]9 + $resolved)"
     ]
-    |> Enum.join("& ")
+    |> Enum.join("; ")
   end
 
   defp workspace_prepare_script(workspace, _platform) do
@@ -525,7 +528,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remove_workspace_script(workspace, :windows) do
-    "if exist \"#{windows_cmd_value(workspace)}\\\" rmdir /s /q \"#{windows_cmd_value(workspace)}\""
+    "if (Test-Path -LiteralPath #{powershell_single_quote(workspace)}) { Remove-Item -LiteralPath #{powershell_single_quote(workspace)} -Recurse -Force }"
   end
 
   defp remove_workspace_script(workspace, _platform) do
@@ -533,7 +536,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp before_remove_hook_script(command, workspace, :windows) do
-    "if exist \"#{windows_cmd_value(workspace)}\\\" (cd /d \"#{windows_cmd_value(workspace)}\" && #{command})"
+    "if (Test-Path -LiteralPath #{powershell_single_quote(workspace)} -PathType Container) { Set-Location -LiteralPath #{powershell_single_quote(workspace)}; #{command} }"
   end
 
   defp before_remove_hook_script(command, workspace, _platform) do
@@ -548,7 +551,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp hook_script(command, workspace, :windows) do
-    "cd /d \"#{windows_cmd_value(workspace)}\" && #{command}"
+    "Set-Location -LiteralPath #{powershell_single_quote(workspace)}; #{command}"
   end
 
   defp hook_script(command, workspace, _platform) do
@@ -573,17 +576,6 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp normalize_worker_platform(_value), do: :posix
-
-  defp windows_cmd_value(value) when is_binary(value) do
-    value
-    |> String.replace("%", "%%")
-    |> String.replace("^", "^^")
-    |> String.replace("&", "^&")
-    |> String.replace("|", "^|")
-    |> String.replace("<", "^<")
-    |> String.replace(">", "^>")
-    |> String.replace("\"", "\\\"")
-  end
 
   defp parse_remote_workspace_output(output) do
     lines = String.split(IO.iodata_to_binary(output), "\n", trim: true)
@@ -623,6 +615,10 @@ defmodule SymphonyElixir.Workspace do
         Task.shutdown(task, :brutal_kill)
         {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
     end
+  end
+
+  defp powershell_single_quote(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "''") <> "'"
   end
 
   defp shell_escape(value) when is_binary(value) do

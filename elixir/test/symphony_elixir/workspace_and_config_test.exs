@@ -1598,7 +1598,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
-  test "remote windows workspace lifecycle uses cmd shell when configured" do
+  test "remote windows workspace lifecycle uses PowerShell encoded commands when configured" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1616,8 +1616,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       trace_file = Path.join(test_root, "ssh.trace")
       fake_ssh = Path.join(test_root, "ssh")
-      workspace_root = "C:\\FROTA\\workspace"
-      workspace_path = "C:\\FROTA\\workspace\\MT-SSH-WIN"
+      workspace_root = "C:\\FROTA\\workspace with spaces"
+      workspace_path = "C:\\FROTA\\workspace with spaces\\MT-SSH-WIN"
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
@@ -1628,12 +1628,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
       printf 'ARGV:%s\n' "$*" >> "$trace_file"
 
-      case "$*" in
-        *"__SYMPHONY_WORKSPACE__"*)
-          printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
-          ;;
-      esac
-
+      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
       exit 0
       """)
 
@@ -1655,16 +1650,96 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WIN", "vitoria")
 
       trace = File.read!(trace_file)
-      assert trace =~ "vitoria cmd.exe /v:on /d /s /c"
-      assert trace =~ "(if not exist"
-      assert trace =~ "!created!"
-      refute trace =~ "%workspace%"
-      assert trace =~ "C:\\FROTA\\workspace"
-      assert trace =~ "MT-SSH-WIN"
-      assert trace =~ "echo before-run"
-      assert trace =~ "echo after-run"
-      assert trace =~ "echo before-remove"
+      assert trace =~ "vitoria powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand"
+      assert length(Regex.scan(~r/EncodedCommand/, trace)) >= 4
+      refute trace =~ "cmd.exe"
       refute trace =~ "bash -lc"
+      refute trace =~ "C:\\FROTA\\workspace"
+      refute trace =~ "MT-SSH-WIN"
+      refute trace =~ "echo before-run"
+      refute trace =~ "echo after-run"
+      refute trace =~ "echo before-remove"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare rejects empty marker output" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-empty-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+    end)
+
+    try do
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\workspace",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"}
+      )
+
+      assert {:error, {:workspace_prepare_failed, :invalid_output, ""}} =
+               Workspace.create_for_issue("MT-SSH-WIN-EMPTY", "vitoria")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare rejects invalid marker output" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-invalid-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+    end)
+
+    try do
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' '__SYMPHONY_WORKSPACE__\tmaybe\t'
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\workspace",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"}
+      )
+
+      assert {:error, {:workspace_prepare_failed, :invalid_output, output}} =
+               Workspace.create_for_issue("MT-SSH-WIN-INVALID", "vitoria")
+
+      assert output =~ "__SYMPHONY_WORKSPACE__"
     after
       File.rm_rf(test_root)
     end
