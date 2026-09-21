@@ -180,6 +180,18 @@ defmodule SymphonyElixir.SSHTest do
            |> :unicode.characters_to_binary({:utf16, :little}, :utf8) == command
   end
 
+  test "remote_shell_command/2 wraps windows cmd transport without PowerShell encoded command" do
+    command = ~S(pushd "C:\FROTA\workspace with spaces" && "C:\Program Files\OpenAI Codex\codex.exe" app-server)
+
+    shell = SSH.remote_shell_command(command, :windows_cmd)
+
+    assert shell =~ ~S(cmd.exe /d /s /c ")
+    assert shell =~ ~S(pushd ^"C:\FROTA\workspace with spaces^")
+    assert shell =~ ~S(^"C:\Program Files\OpenAI Codex\codex.exe^" app-server)
+    refute shell =~ "powershell"
+    refute shell =~ "EncodedCommand"
+  end
+
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do
     fake_bin_dir = Path.join(test_root, "bin")
     fake_ssh = Path.join(fake_bin_dir, "ssh")

@@ -43,6 +43,10 @@ defmodule SymphonyElixir.SSH do
     "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " <> encoded
   end
 
+  def remote_shell_command(command, :windows_cmd) when is_binary(command) do
+    "cmd.exe /d /s /c \"" <> windows_cmd_c_argument(command) <> "\""
+  end
+
   def remote_shell_command(command, _platform) when is_binary(command) do
     remote_shell_command(command)
   end
@@ -108,6 +112,10 @@ defmodule SymphonyElixir.SSH do
     # IPv6 literals contain ":" already, so we only accept additional ":port"
     # parsing when the host is explicitly bracketed, e.g. "[::1]:2222".
     String.contains?(destination, "[") and String.contains?(destination, "]")
+  end
+
+  defp windows_cmd_c_argument(value) when is_binary(value) do
+    String.replace(value, "\"", "^\"")
   end
 
   defp shell_escape(value) when is_binary(value) do

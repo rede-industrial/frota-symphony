@@ -218,7 +218,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     with :ok <- verify_remote_codex_executable(worker_host, remote_platform),
          {:ok, remote_command} <- remote_launch_command(workspace, worker_host, dynamic_tool_binding, remote_platform) do
-      SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: remote_platform)
+      SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: app_server_remote_platform(remote_platform))
     end
   end
 
@@ -245,12 +245,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     with {:ok, codex_command} <- codex_launch_command(worker_host, :windows) do
       command =
         [
-          "Set-Location -LiteralPath #{powershell_single_quote(workspace)}",
+          "pushd #{windows_cmd_quote(workspace)}",
           tracker_secret_unset_command(dynamic_tool_binding, :windows),
           codex_command
         ]
         |> Enum.reject(&is_nil/1)
-        |> windows_command_sequence()
+        |> Enum.join(" && ")
 
       {:ok, command}
     end
@@ -305,18 +305,12 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp codex_executable_check_command(_worker_host, _platform), do: nil
 
-  defp windows_command_sequence(commands) when is_list(commands) do
-    commands
-    |> Enum.map(&"#{&1}; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
-    |> Enum.join("; ")
-  end
-
   defp codex_launch_command(worker_host, :windows) do
     settings = Config.settings!()
 
     case configured_codex_executable(worker_host) do
       executable when is_binary(executable) ->
-        {:ok, "& #{powershell_single_quote(executable)}#{command_tail(settings.codex.command)}"}
+        {:ok, "#{windows_cmd_quote(executable)}#{command_tail(settings.codex.command)}"}
 
       nil ->
         {:ok, settings.codex.command}
@@ -1137,6 +1131,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp maybe_set_usage(metadata, _payload), do: metadata
 
+  defp app_server_remote_platform(:windows), do: :windows_cmd
+  defp app_server_remote_platform(platform), do: platform
+
   defp worker_platform(worker_host) when is_binary(worker_host) do
     Config.settings!().worker.platforms
     |> Map.get(worker_host)
@@ -1155,6 +1152,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp normalize_worker_platform(_value), do: :posix
+
+  defp windows_cmd_quote(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+  end
 
   defp powershell_single_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "''") <> "'"

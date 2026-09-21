@@ -85,8 +85,10 @@ defmodule SymphonyElixir.AppServerTest do
 
     assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-117", "carla")
 
-    assert command =~ "Set-Location -LiteralPath 'C:\\FROTA\\workspaces\\GH-117'"
+    assert command =~ "pushd \"C:\\FROTA\\workspaces\\GH-117\""
     assert command =~ "codex app-server"
+    refute command =~ "Set-Location"
+    refute command =~ "powershell"
     refute command =~ "& '"
 
     assert AppServer.codex_executable_check_command_for_test("carla") =~ "Get-Command 'codex'"
@@ -104,8 +106,9 @@ defmodule SymphonyElixir.AppServerTest do
 
     assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-117", "carla")
 
-    assert command =~ "Set-Location -LiteralPath 'C:\\FROTA\\workspaces\\GH-117'"
-    assert command =~ "& '#{codex_path}' app-server"
+    assert command =~ "pushd \"C:\\FROTA\\workspaces\\GH-117\""
+    assert command =~ "\"#{codex_path}\" app-server"
+    refute command =~ "Set-Location"
     refute command =~ "&& codex app-server"
 
     assert AppServer.codex_executable_check_command_for_test("carla") =~ "Test-Path -LiteralPath '#{codex_path}'"
@@ -123,7 +126,7 @@ defmodule SymphonyElixir.AppServerTest do
 
     assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-118", "vitoria")
 
-    assert command =~ "& '#{codex_path}' app-server"
+    assert command =~ "\"#{codex_path}\" app-server"
     assert AppServer.codex_executable_check_command_for_test("vitoria") =~ "Test-Path -LiteralPath '#{codex_path}'"
   end
 
