@@ -1598,6 +1598,179 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
+  test "remote windows workspace prepare runs after_create for newly prepared workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-new-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="$trace_file.count"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+        exit 0
+      fi
+
+      if [ "$count" -eq 2 ]; then
+        printf 'after_create ok\n'
+        exit 0
+      fi
+
+      printf 'unexpected extra call\n' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("GH-117", "carla")
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace rerun reuses valid existing git workspace without after_create" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-rerun-existing-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="$trace_file.count"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '0' '#{workspace_path}'
+        exit 0
+      fi
+
+      printf 'unexpected hook call\n' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("GH-117", "carla")
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare fails closed for unknown non-empty workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-unknown-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+      printf 'workspace exists and is not empty; refusing to run after_create\n' >&2
+      exit 17
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:error, {:workspace_prepare_failed, "carla", 17, output}} =
+               Workspace.create_for_issue("GH-117", "carla")
+
+      assert output =~ "workspace exists and is not empty"
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "remote windows workspace lifecycle uses PowerShell encoded commands when configured" do
     test_root =
       Path.join(

@@ -497,8 +497,8 @@ defmodule SymphonyElixir.Workspace do
       "$ErrorActionPreference = 'Stop'",
       "$workspace = #{escaped_workspace}",
       "$created = '0'",
-      "if (Test-Path -LiteralPath $workspace -PathType Leaf) { Remove-Item -LiteralPath $workspace -Force }",
-      "if (-not (Test-Path -LiteralPath $workspace -PathType Container)) { New-Item -ItemType Directory -Force -Path $workspace | Out-Null; $created = '1' }",
+      "if (Test-Path -LiteralPath $workspace -PathType Leaf) { Write-Error 'workspace path exists and is not a directory'; exit 17 }",
+      "if (-not (Test-Path -LiteralPath $workspace -PathType Container)) { New-Item -ItemType Directory -Force -Path $workspace | Out-Null; $created = '1' } else { $children = @(Get-ChildItem -LiteralPath $workspace -Force -ErrorAction Stop); if ($children.Count -eq 0) { $created = '1' } elseif (Test-Path -LiteralPath (Join-Path $workspace '.git') -PathType Container) { $created = '0' } else { Write-Error 'workspace exists and is not empty; refusing to run after_create'; exit 17 } }",
       "$resolved = (Resolve-Path -LiteralPath $workspace).Path",
       "Set-Location -LiteralPath $resolved",
       "Write-Output ('#{@remote_workspace_marker}' + [char]9 + $created + [char]9 + $resolved)"
