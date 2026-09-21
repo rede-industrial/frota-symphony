@@ -1837,6 +1837,66 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "remote windows workspace prepare trims CRLF line endings from marker path" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-crlf-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      count_file = Path.join(test_root, "ssh.count")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "C:\\FROTA\\symphony-workspaces"
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="#{count_file}"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\r\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+      fi
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git status --short"
+      )
+
+      assert {:ok, returned_workspace} = Workspace.create_for_issue("GH-117", "carla")
+      assert returned_workspace == workspace_path
+      refute String.ends_with?(returned_workspace, <<13>>)
+      assert File.read!(count_file) == "2"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "remote windows workspace prepare rejects empty marker output" do
     test_root =
       Path.join(

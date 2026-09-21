@@ -583,8 +583,12 @@ defmodule SymphonyElixir.Workspace do
     payload =
       Enum.find_value(lines, fn line ->
         case String.split(line, "\t", parts: 3) do
-          [@remote_workspace_marker, created, path] when created in ["0", "1"] and path != "" ->
-            {created == "1", path}
+          [@remote_workspace_marker, created, path] when created in ["0", "1"] ->
+            normalized_path = trim_remote_line_ending(path)
+
+            if normalized_path != "" do
+              {created == "1", normalized_path}
+            end
 
           _ ->
             nil
@@ -598,6 +602,12 @@ defmodule SymphonyElixir.Workspace do
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
     end
+  end
+
+  defp trim_remote_line_ending(value) when is_binary(value) do
+    value
+    |> String.trim_trailing("\n")
+    |> String.trim_trailing("\r")
   end
 
   defp run_remote_command(worker_host, script, timeout_ms)
