@@ -863,6 +863,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
       issue_routable?(issue) and
+      pilot_issue_allowed?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -872,6 +873,54 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
   end
+
+  defp pilot_issue_allowed?(%Issue{} = issue) do
+    pilot = Config.settings!().pilot
+
+    if pilot.enabled do
+      pilot_issue_id_allowed?(issue, pilot.issue_ids) and
+        pilot_required_labels_allowed?(issue, pilot.required_labels) and
+        pilot_capability_allowed?(issue, pilot.capabilities)
+    else
+      true
+    end
+  end
+
+  defp pilot_issue_id_allowed?(%Issue{id: id, identifier: identifier}, issue_ids) do
+    allowed = MapSet.new(issue_ids || [])
+    MapSet.member?(allowed, id) or MapSet.member?(allowed, identifier)
+  end
+
+  defp pilot_required_labels_allowed?(%Issue{labels: labels}, required_labels) do
+    issue_labels = MapSet.new(labels || [], &normalize_label/1)
+    Enum.all?(required_labels || [], &MapSet.member?(issue_labels, normalize_label(&1)))
+  end
+
+  defp pilot_capability_allowed?(%Issue{labels: labels}, capabilities) do
+    issue_capabilities =
+      labels
+      |> List.wrap()
+      |> Enum.map(&label_capability/1)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    Enum.all?(capabilities || [], &MapSet.member?(issue_capabilities, normalize_capability(&1)))
+  end
+
+  defp label_capability("capability:" <> capability), do: normalize_capability(capability)
+  defp label_capability(_), do: nil
+
+  defp normalize_label(label) when is_binary(label), do: label |> String.trim() |> String.downcase()
+  defp normalize_label(label), do: label |> to_string() |> normalize_label()
+
+  defp normalize_capability(capability) when is_binary(capability) do
+    capability
+    |> String.trim()
+    |> String.replace("-", "_")
+    |> String.upcase()
+  end
+
+  defp normalize_capability(capability), do: capability |> to_string() |> normalize_capability()
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1032,6 +1081,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
+       when is_binary(issue_id) and is_map(metadata) do
+    if pilot_ignore_retries?() do
+      Logger.info("Pilot mode ignoring retry for issue_id=#{issue_id}")
+      state
+    else
+      do_schedule_issue_retry(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp do_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
@@ -1218,6 +1277,11 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp pilot_ignore_retries? do
+    pilot = Config.settings!().pilot
+    pilot.enabled and pilot.ignore_retries
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do

@@ -279,6 +279,84 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+
+  defmodule Pilot do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:issue_ids, {:array, :string}, default: [])
+      field(:required_labels, {:array, :string}, default: [])
+      field(:capabilities, {:array, :string}, default: [])
+      field(:worker_host, :string)
+      field(:ignore_retries, :boolean, default: false)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :issue_ids, :required_labels, :capabilities, :worker_host, :ignore_retries], empty_values: [])
+      |> update_change(:issue_ids, &normalize_tokens/1)
+      |> update_change(:required_labels, &normalize_labels/1)
+      |> update_change(:capabilities, &normalize_capabilities/1)
+      |> update_change(:worker_host, &normalize_optional_string/1)
+      |> validate_pilot_contract()
+    end
+
+    defp validate_pilot_contract(changeset) do
+      if get_field(changeset, :enabled) do
+        changeset
+        |> validate_length(:issue_ids, is: 1)
+        |> validate_length(:capabilities, is: 1)
+        |> validate_required([:worker_host])
+        |> validate_change(:worker_host, fn :worker_host, value ->
+          if is_binary(value) and String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
+        end)
+      else
+        changeset
+      end
+    end
+
+    defp normalize_tokens(values) when is_list(values) do
+      values
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp normalize_tokens(_), do: []
+
+    defp normalize_labels(values) when is_list(values) do
+      values
+      |> Enum.map(&(to_string(&1) |> String.trim() |> String.downcase()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp normalize_labels(_), do: []
+
+    defp normalize_capabilities(values) when is_list(values) do
+      values
+      |> Enum.map(&(to_string(&1) |> String.trim() |> String.upcase()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp normalize_capabilities(_), do: []
+
+    defp normalize_optional_string(value) when is_binary(value) do
+      case String.trim(value) do
+        "" -> nil
+        trimmed -> trimmed
+      end
+    end
+
+    defp normalize_optional_string(value), do: value
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -329,6 +407,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:pilot, Pilot, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -423,6 +502,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:pilot, with: &Pilot.changeset/2)
   end
 
   defp finalize_settings(settings) do

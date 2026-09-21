@@ -124,6 +124,12 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          pilot_enabled: false,
+          pilot_issue_ids: [],
+          pilot_required_labels: [],
+          pilot_capabilities: [],
+          pilot_worker_host: nil,
+          pilot_ignore_retries: false,
           prompt: @workflow_prompt
         ],
         overrides
@@ -163,6 +169,12 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    pilot_enabled = Keyword.get(config, :pilot_enabled)
+    pilot_issue_ids = Keyword.get(config, :pilot_issue_ids)
+    pilot_required_labels = Keyword.get(config, :pilot_required_labels)
+    pilot_capabilities = Keyword.get(config, :pilot_capabilities)
+    pilot_worker_host = Keyword.get(config, :pilot_worker_host)
+    pilot_ignore_retries = Keyword.get(config, :pilot_ignore_retries)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -198,6 +210,7 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        pilot_yaml(pilot_enabled, pilot_issue_ids, pilot_required_labels, pilot_capabilities, pilot_worker_host, pilot_ignore_retries),
         "---",
         prompt
       ]
@@ -227,6 +240,22 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+
+  defp pilot_yaml(false, [], [], [], nil, false), do: nil
+
+  defp pilot_yaml(enabled, issue_ids, required_labels, capabilities, worker_host, ignore_retries) do
+    [
+      "pilot:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  issue_ids: #{yaml_value(issue_ids)}",
+      "  required_labels: #{yaml_value(required_labels)}",
+      "  capabilities: #{yaml_value(capabilities)}",
+      "  worker_host: #{yaml_value(worker_host)}",
+      "  ignore_retries: #{yaml_value(ignore_retries)}"
+    ]
+    |> Enum.join("\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

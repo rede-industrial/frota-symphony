@@ -1099,6 +1099,93 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 39_500, 40_500)
   end
 
+
+  test "pilot mode dispatches only the allowlisted issue and capability" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["101"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    allowed = %Issue{
+      id: "101",
+      identifier: "GH-101",
+      title: "Pilot issue",
+      state: "Todo",
+      labels: ["p0-factory-loop-1x1-20260921", "capability:backend-engineering"],
+      dispatchable: true
+    }
+
+    wrong_issue = %{allowed | id: "102", identifier: "GH-102"}
+    wrong_capability = %{allowed | labels: ["p0-factory-loop-1x1-20260921", "capability:frontend-engineering"]}
+    missing_pilot_label = %{allowed | labels: ["capability:backend-engineering"]}
+
+    assert Orchestrator.should_dispatch_issue_for_test(allowed, state)
+    refute Orchestrator.should_dispatch_issue_for_test(wrong_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(wrong_capability, state)
+    refute Orchestrator.should_dispatch_issue_for_test(missing_pilot_label, state)
+    assert Orchestrator.select_worker_host_for_test(state, nil) == "carla"
+  end
+
+  test "pilot mode can ignore retries after worker exit" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["issue-pilot-retry"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    issue_id = "issue-pilot-retry"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :PilotRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "GH-101",
+      issue: %Issue{id: issue_id, identifier: "GH-101", state: "open"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :boom})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert state.retry_attempts == %{}
+    assert MapSet.member?(state.claimed, issue_id)
+  end
+
   test "first abnormal worker exit waits before retrying" do
     issue_id = "issue-crash-initial"
     ref = make_ref()
