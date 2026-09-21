@@ -359,6 +359,7 @@ defmodule SymphonyElixir.CoreTest do
 
     hook_marker = Path.join(test_root, "before-run-started")
     hook_fifo = Path.join(test_root, "before-run-blocker")
+    hook_pids = Path.join(test_root, "before-run-pids")
     runtime_supervisor_name = Module.concat(__MODULE__, "AgentRuntimeSupervisor#{issue_suffix}")
     task_supervisor_name = Module.concat(__MODULE__, "TaskSupervisor#{issue_suffix}")
     orchestrator_name = Module.concat(__MODULE__, "RestartOrchestrator#{issue_suffix}")
@@ -377,10 +378,14 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     on_exit(fn ->
+      release_fifo_reader(hook_fifo)
+
       if pid = Process.whereis(runtime_supervisor_name) do
         GenServer.stop(pid)
       end
 
+      terminate_recorded_pids(hook_pids)
+      terminate_test_root_processes(test_root)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restart_default_runtime!()
       File.rm_rf(test_root)
@@ -398,7 +403,8 @@ defmodule SymphonyElixir.CoreTest do
       tracker_kind: "memory",
       workspace_root: test_root,
       poll_interval_ms: 10,
-      hook_before_run: "mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
+      hook_before_run:
+        "echo $$ >> \"#{hook_pids}\"; [ -p \"#{hook_fifo}\" ] || mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
       hook_timeout_ms: 60_000
     )
 
@@ -1349,6 +1355,66 @@ defmodule SymphonyElixir.CoreTest do
 
     assert remaining_ms >= min_remaining_ms
     assert remaining_ms <= max_remaining_ms
+  end
+
+  defp release_fifo_reader(path) do
+    if File.exists?(path) do
+      task =
+        Task.async(fn ->
+          File.write(path, "\n")
+        end)
+
+      Task.yield(task, 100) || Task.shutdown(task, :brutal_kill)
+    end
+
+    :ok
+  end
+
+  defp terminate_recorded_pids(path) do
+    path
+    |> read_recorded_pids()
+    |> Enum.each(&terminate_recorded_pid/1)
+  end
+
+  defp read_recorded_pids(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        contents
+        |> String.split()
+        |> Enum.flat_map(fn value ->
+          case Integer.parse(value) do
+            {pid, ""} -> [pid]
+            _ -> []
+          end
+        end)
+        |> Enum.uniq()
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp terminate_recorded_pid(pid) when is_integer(pid) do
+    System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  end
+
+  defp terminate_test_root_processes(test_root) do
+    case System.cmd("pgrep", ["-f", test_root], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split()
+        |> Enum.flat_map(fn value ->
+          case Integer.parse(value) do
+            {pid, ""} -> [pid]
+            _ -> []
+          end
+        end)
+        |> Enum.each(&terminate_recorded_pid/1)
+
+      {_output, _status} ->
+        :ok
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
