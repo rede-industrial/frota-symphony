@@ -215,8 +215,21 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp start_port(workspace, worker_host, dynamic_tool_binding) when is_binary(worker_host) do
     remote_platform = worker_platform(worker_host)
-    remote_command = remote_launch_command(workspace, dynamic_tool_binding, remote_platform)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: remote_platform)
+
+    with :ok <- verify_remote_codex_executable(worker_host, remote_platform),
+         {:ok, remote_command} <- remote_launch_command(workspace, worker_host, dynamic_tool_binding, remote_platform) do
+      SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: remote_platform)
+    end
+  end
+
+  @doc false
+  def remote_launch_command_for_test(workspace, worker_host, remote_platform \\ :windows) do
+    remote_launch_command(workspace, worker_host, %{secret_environment_names: []}, remote_platform)
+  end
+
+  @doc false
+  def codex_executable_check_command_for_test(worker_host, remote_platform \\ :windows) do
+    codex_executable_check_command(worker_host, remote_platform)
   end
 
   defp local_launch_command(dynamic_tool_binding) do
@@ -228,24 +241,128 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> Enum.join(" && ")
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding, :windows) when is_binary(workspace) do
-    [
-      "cd /d \"#{windows_cmd_value(workspace)}\"",
-      tracker_secret_unset_command(dynamic_tool_binding, :windows),
-      Config.settings!().codex.command
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join(" && ")
+  defp remote_launch_command(workspace, worker_host, dynamic_tool_binding, :windows) when is_binary(workspace) do
+    with {:ok, codex_command} <- codex_launch_command(worker_host, :windows) do
+      command =
+        [
+          "Set-Location -LiteralPath #{powershell_single_quote(workspace)}",
+          tracker_secret_unset_command(dynamic_tool_binding, :windows),
+          codex_command
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> windows_command_sequence()
+
+      {:ok, command}
+    end
   end
 
-  defp remote_launch_command(workspace, dynamic_tool_binding, _platform) when is_binary(workspace) do
-    [
-      "cd #{shell_escape(workspace)}",
-      tracker_secret_unset_command(dynamic_tool_binding),
-      "exec #{Config.settings!().codex.command}"
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join(" && ")
+  defp remote_launch_command(workspace, worker_host, dynamic_tool_binding, _platform) when is_binary(workspace) do
+    with {:ok, codex_command} <- codex_launch_command(worker_host, :posix) do
+      command =
+        [
+          "cd #{shell_escape(workspace)}",
+          tracker_secret_unset_command(dynamic_tool_binding),
+          "exec #{codex_command}"
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" && ")
+
+      {:ok, command}
+    end
+  end
+
+  defp verify_remote_codex_executable(worker_host, :windows) do
+    case codex_executable_check_command(worker_host, :windows) do
+      nil ->
+        :ok
+
+      check_command ->
+        case SSH.run(worker_host, check_command, stderr_to_stdout: true, remote_platform: :windows) do
+          {:ok, {_output, 0}} -> :ok
+          {:ok, {output, _status}} -> {:error, {:codex_executable_not_found, String.trim(to_string(output))}}
+          {:error, reason} -> {:error, {:codex_executable_check_failed, reason}}
+        end
+    end
+  end
+
+  defp verify_remote_codex_executable(_worker_host, _platform), do: :ok
+
+  defp codex_executable_check_command(worker_host, :windows) do
+    case configured_codex_executable(worker_host) do
+      executable when is_binary(executable) ->
+        "if (Test-Path -LiteralPath #{powershell_single_quote(executable)} -PathType Leaf) { exit 0 } else { Write-Output #{powershell_single_quote("CODEX_EXECUTABLE_NOT_FOUND=#{executable}")}; exit 127 }"
+
+      nil ->
+        case command_executable_token(Config.settings!().codex.command) do
+          nil ->
+            nil
+
+          token ->
+            "if (Get-Command #{powershell_single_quote(token)} -ErrorAction SilentlyContinue) { exit 0 } else { Write-Output #{powershell_single_quote("CODEX_EXECUTABLE_NOT_FOUND=#{token}")}; exit 127 }"
+        end
+    end
+  end
+
+  defp codex_executable_check_command(_worker_host, _platform), do: nil
+
+  defp windows_command_sequence(commands) when is_list(commands) do
+    commands
+    |> Enum.map(&"#{&1}; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
+    |> Enum.join("; ")
+  end
+
+  defp codex_launch_command(worker_host, :windows) do
+    settings = Config.settings!()
+
+    case configured_codex_executable(worker_host) do
+      executable when is_binary(executable) ->
+        {:ok, "& #{powershell_single_quote(executable)}#{command_tail(settings.codex.command)}"}
+
+      nil ->
+        {:ok, settings.codex.command}
+    end
+  end
+
+  defp codex_launch_command(worker_host, _platform) do
+    settings = Config.settings!()
+
+    case configured_codex_executable(worker_host) do
+      executable when is_binary(executable) -> {:ok, shell_escape(executable) <> command_tail(settings.codex.command)}
+      nil -> {:ok, settings.codex.command}
+    end
+  end
+
+  defp configured_codex_executable(worker_host) when is_binary(worker_host) do
+    Config.settings!().codex.executables
+    |> Map.get(worker_host)
+    |> case do
+      value when is_binary(value) and value != "" -> value
+      _ -> nil
+    end
+  end
+
+  defp configured_codex_executable(_worker_host), do: nil
+
+  defp command_tail(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> case do
+      [_executable, tail] when tail != "" -> " " <> tail
+      _ -> ""
+    end
+  end
+
+  defp command_executable_token(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> case do
+      nil -> nil
+      "" -> nil
+      token -> token
+    end
   end
 
   defp tracker_secret_port_env(dynamic_tool_binding) do
@@ -1039,15 +1156,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp normalize_worker_platform(_value), do: :posix
 
-  defp windows_cmd_value(value) when is_binary(value) do
-    value
-    |> String.replace("%", "%%")
-    |> String.replace("^", "^^")
-    |> String.replace("&", "^&")
-    |> String.replace("|", "^|")
-    |> String.replace("<", "^<")
-    |> String.replace(">", "^>")
-    |> String.replace("\"", "\\\"")
+  defp powershell_single_quote(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "''") <> "'"
   end
 
   defp shell_escape(value) when is_binary(value) do

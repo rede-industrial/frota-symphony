@@ -76,6 +76,73 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "windows remote app server uses codex from PATH when no worker executable is configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["carla"],
+      worker_platforms: %{"carla" => "windows"},
+      codex_command: "codex app-server"
+    )
+
+    assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-117", "carla")
+
+    assert command =~ "Set-Location -LiteralPath 'C:\\FROTA\\workspaces\\GH-117'"
+    assert command =~ "codex app-server"
+    refute command =~ "& '"
+
+    assert AppServer.codex_executable_check_command_for_test("carla") =~ "Get-Command 'codex'"
+  end
+
+  test "windows remote app server uses explicit worker codex executable outside PATH" do
+    codex_path = "C:\\Users\\svc_frota_carla.DESKTOP-2Q0LC2G\\.codex\\packages\\standalone\\current\\bin\\codex.exe"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["carla"],
+      worker_platforms: %{"carla" => "windows"},
+      codex_command: "codex app-server",
+      codex_executables: %{"carla" => codex_path}
+    )
+
+    assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-117", "carla")
+
+    assert command =~ "Set-Location -LiteralPath 'C:\\FROTA\\workspaces\\GH-117'"
+    assert command =~ "& '#{codex_path}' app-server"
+    refute command =~ "&& codex app-server"
+
+    assert AppServer.codex_executable_check_command_for_test("carla") =~ "Test-Path -LiteralPath '#{codex_path}'"
+  end
+
+  test "windows explicit codex executable path with spaces is quoted" do
+    codex_path = "C:\\Program Files\\OpenAI Codex\\codex.exe"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows"},
+      codex_command: "codex app-server",
+      codex_executables: %{"vitoria" => codex_path}
+    )
+
+    assert {:ok, command} = AppServer.remote_launch_command_for_test("C:\\FROTA\\workspaces\\GH-118", "vitoria")
+
+    assert command =~ "& '#{codex_path}' app-server"
+    assert AppServer.codex_executable_check_command_for_test("vitoria") =~ "Test-Path -LiteralPath '#{codex_path}'"
+  end
+
+  test "windows explicit codex executable check fails closed when executable is missing" do
+    codex_path = "C:\\Missing\\codex.exe"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["carla"],
+      worker_platforms: %{"carla" => "windows"},
+      codex_command: "codex app-server",
+      codex_executables: %{"carla" => codex_path}
+    )
+
+    check = AppServer.codex_executable_check_command_for_test("carla")
+
+    assert check =~ "CODEX_EXECUTABLE_NOT_FOUND=#{codex_path}"
+    assert check =~ "exit 127"
+  end
+
   test "turn timeout resets on stream updates and fires after silence" do
     test_root =
       Path.join(

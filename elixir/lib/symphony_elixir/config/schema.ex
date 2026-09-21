@@ -222,6 +222,7 @@ defmodule SymphonyElixir.Config.Schema do
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
+      field(:executables, :map, default: %{})
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -237,6 +238,7 @@ defmodule SymphonyElixir.Config.Schema do
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
+          :executables,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
@@ -254,7 +256,24 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> update_change(:executables, &normalize_executables/1)
     end
+
+    defp normalize_executables(values) when is_map(values) do
+      values
+      |> Enum.reduce(%{}, fn {host, executable}, acc ->
+        host = to_string(host) |> String.trim()
+        executable = to_string(executable) |> String.trim()
+
+        if host == "" or executable == "" do
+          acc
+        else
+          Map.put(acc, host, executable)
+        end
+      end)
+    end
+
+    defp normalize_executables(_), do: %{}
   end
 
   defmodule Hooks do
@@ -278,7 +297,6 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:timeout_ms, greater_than: 0)
     end
   end
-
 
   defmodule Pilot do
     @moduledoc false
