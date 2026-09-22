@@ -403,8 +403,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_kind: "memory",
       workspace_root: test_root,
       poll_interval_ms: 10,
-      hook_before_run:
-        "echo $$ >> \"#{hook_pids}\"; [ -p \"#{hook_fifo}\" ] || mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
+      hook_before_run: "echo $$ >> \"#{hook_pids}\"; [ -p \"#{hook_fifo}\" ] || mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
       hook_timeout_ms: 60_000
     )
 
@@ -1105,7 +1104,6 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 39_500, 40_500)
   end
 
-
   test "pilot mode dispatches only the allowlisted issue and capability" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
@@ -1303,6 +1301,80 @@ defmodule SymphonyElixir.CoreTest do
     assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
   end
 
+  test "canonical routing maps capabilities to exact remote workers and denies unknowns" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    routing_file = Path.join(workflow_dir, "canonical-routing.json")
+
+    File.write!(
+      routing_file,
+      Jason.encode!(%{
+        "remote_destinations" => %{
+          "vitoria" => %{"host_alias" => "vitoria"},
+          "carla" => %{"host_alias" => "carla"},
+          "pedro" => %{"host_alias" => "pedro"}
+        },
+        "routes" => [
+          %{"capability" => "FRONTEND_ENGINEERING", "destination_id" => "vitoria"},
+          %{"capability" => "BACKEND_ENGINEERING", "destination_id" => "carla"},
+          %{"capability" => "INFRA_DEVOPS", "destination_id" => "pedro"}
+        ]
+      })
+    )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["symphony-safe-pilot-20260911"],
+      worker_ssh_hosts: ["vitoria", "carla", "pedro"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    frontend = routed_issue("frontend", "capability:frontend-engineering")
+    backend = routed_issue("backend", "capability:backend-engineering")
+    infra = routed_issue("infra", "capability:infra-devops")
+    unknown = routed_issue("unknown", "capability:unknown")
+
+    assert Orchestrator.routed_worker_host_for_test(state, frontend) == "vitoria"
+    assert Orchestrator.routed_worker_host_for_test(state, backend) == "carla"
+    assert Orchestrator.routed_worker_host_for_test(state, infra) == "pedro"
+    assert Orchestrator.routed_worker_host_for_test(state, unknown) == {:deny, :unknown_capability}
+
+    assert Orchestrator.should_dispatch_issue_for_test(frontend, state)
+    refute Orchestrator.should_dispatch_issue_for_test(unknown, state)
+  end
+
+  test "canonical routing denies missing destinations and prevents local fallback" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    routing_file = Path.join(workflow_dir, "canonical-routing.json")
+
+    File.write!(
+      routing_file,
+      Jason.encode!(%{
+        "remote_destinations" => %{"vitoria" => %{"host_alias" => "vitoria"}},
+        "routes" => [
+          %{"capability" => "FRONTEND_ENGINEERING", "destination_id" => "missing-worker"},
+          %{"capability" => "BACKEND_ENGINEERING"}
+        ]
+      })
+    )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["symphony-safe-pilot-20260911"],
+      worker_ssh_hosts: [],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    frontend = routed_issue("frontend", "capability:frontend-engineering")
+    backend = routed_issue("backend", "capability:backend-engineering")
+
+    assert Orchestrator.routed_worker_host_for_test(state, frontend) == {:deny, :unknown_worker}
+    assert Orchestrator.routed_worker_host_for_test(state, backend) == {:deny, :missing_destination}
+    refute Orchestrator.should_dispatch_issue_for_test(frontend, state)
+    refute Orchestrator.should_dispatch_issue_for_test(backend, state)
+  end
+
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],
@@ -1348,6 +1420,17 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
+  end
+
+  defp routed_issue(id, capability_label) do
+    %Issue{
+      id: id,
+      identifier: "GH-#{id}",
+      title: "Routed #{id}",
+      state: "Todo",
+      labels: ["symphony-safe-pilot-20260911", capability_label],
+      dispatchable: true
+    }
   end
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do

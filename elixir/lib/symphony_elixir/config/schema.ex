@@ -142,7 +142,7 @@ defmodule SymphonyElixir.Config.Schema do
         invalid =
           platforms
           |> Enum.reject(fn {host, platform} ->
-            is_binary(host) and normalize_platform(platform) in [:posix, :windows]
+            is_binary(host) and normalize_platform(platform) in [:posix, :windows, :windows_cmd]
           end)
 
         if invalid == [] do
@@ -160,6 +160,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> case do
         "windows" -> :windows
         "win32" -> :windows
+        "windows_cmd" -> :windows_cmd
+        "cmd" -> :windows_cmd
         "posix" -> :posix
         "linux" -> :posix
         "unix" -> :posix
@@ -168,6 +170,23 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp normalize_platform(_value), do: :unknown
+  end
+
+  defmodule Routing do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:canonical_file, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:canonical_file], empty_values: [])
+    end
   end
 
   defmodule Agent do
@@ -420,6 +439,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:routing, Routing, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
@@ -515,6 +535,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
+    |> cast_embed(:routing, with: &Routing.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)

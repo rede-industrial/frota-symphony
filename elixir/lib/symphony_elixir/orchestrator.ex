@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Routing, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -405,6 +405,13 @@ defmodule SymphonyElixir.Orchestrator do
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec routed_worker_host_for_test(term(), Issue.t(), String.t() | nil) ::
+          String.t() | nil | :no_worker_capacity | {:deny, term()}
+  def routed_worker_host_for_test(%State{} = state, %Issue{} = issue, preferred_worker_host \\ nil) do
+    routed_worker_host(state, issue, preferred_worker_host)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -825,7 +832,7 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      worker_slots_available?(state, issue)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -989,9 +996,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
-    case select_worker_host(state, preferred_worker_host) do
+    case routed_worker_host(state, issue, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        state
+
+      {:deny, reason} ->
+        Logger.warning("Skipping dispatch; canonical routing denied #{issue_context(issue)} reason=#{inspect(reason)}")
         state
 
       worker_host ->
@@ -1386,12 +1397,33 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp worker_slots_available?(%State{} = state) do
-    select_worker_host(state, nil) != :no_worker_capacity
+  defp worker_slots_available?(%State{} = state, %Issue{} = issue) do
+    case routed_worker_host(state, issue, nil) do
+      {:deny, _reason} -> false
+      :no_worker_capacity -> false
+      _worker_host -> true
+    end
   end
 
   defp worker_slots_available?(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host) != :no_worker_capacity
+  end
+
+  defp routed_worker_host(%State{} = state, %Issue{} = issue, preferred_worker_host) do
+    case Routing.worker_for_issue(issue) do
+      {:ok, destination} ->
+        if destination in Config.settings!().worker.ssh_hosts do
+          select_worker_host(state, preferred_worker_host || destination)
+        else
+          {:deny, :worker_not_configured}
+        end
+
+      :local_allowed ->
+        select_worker_host(state, preferred_worker_host)
+
+      {:error, reason} ->
+        {:deny, reason}
+    end
   end
 
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do
