@@ -1819,6 +1819,75 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt == "Retry #2"
   end
 
+  test "prompt builder adds remote windows pilot contract without weakening approval policy" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Handle {{ issue.identifier }} on {{ worker.host }} in {{ worker.workspace }}.",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      pilot_enabled: true,
+      pilot_issue_ids: ["120"],
+      pilot_required_labels: ["symphony-safe-pilot-20260911"],
+      pilot_capabilities: ["FRONTEND_ENGINEERING"],
+      pilot_worker_host: "vitoria",
+      codex_approval_policy: "on-request",
+      codex_thread_sandbox: "workspace-write"
+    )
+
+    issue = %Issue{
+      identifier: "GH-120",
+      title: "Vitoria commissioning",
+      description: "Produce structured proof without privileged commands.",
+      state: "open",
+      url: "https://github.com/rede-industrial/frota-control-center/issues/120",
+      labels: ["symphony-safe-pilot-20260911", "capability:frontend-engineering"]
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        worker_host: "vitoria",
+        workspace: "C:\\FROTA\\symphony-workspaces\\GH-120"
+      )
+
+    assert prompt =~ "Handle GH-120 on vitoria in C:\\FROTA\\symphony-workspaces\\GH-120."
+    assert prompt =~ "Remote Windows commissioning contract:"
+    assert prompt =~ "worker_host=vitoria"
+    assert prompt =~ "This pilot must not require PowerShell."
+    assert prompt =~ "Do not run PowerShell commands."
+    assert prompt =~ "Do not request shell approval"
+    assert prompt =~ "normal workspace file reads/writes"
+    assert prompt =~ "return the structured result from the issue context"
+    refute prompt =~ "hostname\nwhoami\ncd\ngit status"
+
+    assert Config.settings!().codex.approval_policy == "on-request"
+    assert Config.settings!().codex.thread_sandbox == "workspace-write"
+  end
+
+  test "prompt builder does not add remote windows pilot contract outside pilot mode" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Handle {{ issue.identifier }}.",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      pilot_enabled: false
+    )
+
+    issue = %Issue{
+      identifier: "GH-121",
+      title: "Normal work",
+      description: "No pilot contract",
+      state: "open",
+      url: "https://github.com/rede-industrial/frota-control-center/issues/121",
+      labels: ["capability:frontend-engineering"]
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        worker_host: "vitoria",
+        workspace: "C:\\FROTA\\symphony-workspaces\\GH-121"
+      )
+
+    refute prompt =~ "Remote Windows commissioning contract:"
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(

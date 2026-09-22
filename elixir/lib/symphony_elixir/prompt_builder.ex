@@ -18,11 +18,13 @@ defmodule SymphonyElixir.PromptBuilder do
     |> Solid.render!(
       %{
         "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
+        "issue" => issue |> Map.from_struct() |> to_solid_map(),
+        "worker" => worker_context(opts) |> to_solid_map()
       },
       @render_opts
     )
     |> IO.iodata_to_binary()
+    |> append_remote_windows_pilot_contract(opts)
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -60,5 +62,64 @@ defmodule SymphonyElixir.PromptBuilder do
     else
       prompt
     end
+  end
+
+  defp worker_context(opts) do
+    %{
+      host: Keyword.get(opts, :worker_host),
+      workspace: Keyword.get(opts, :workspace)
+    }
+  end
+
+  defp append_remote_windows_pilot_contract(prompt, opts) do
+    worker_host = Keyword.get(opts, :worker_host)
+
+    if remote_windows_pilot?(worker_host) do
+      prompt <> remote_windows_pilot_contract(worker_host, Keyword.get(opts, :workspace))
+    else
+      prompt
+    end
+  end
+
+  defp remote_windows_pilot?(worker_host) when is_binary(worker_host) and worker_host != "" do
+    settings = Config.settings!()
+
+    settings.pilot.enabled and windows_worker_platform?(Map.get(settings.worker.platforms, worker_host))
+  end
+
+  defp remote_windows_pilot?(_worker_host), do: false
+
+  defp windows_worker_platform?(platform) when platform in [:windows, :windows_cmd], do: true
+
+  defp windows_worker_platform?(platform) when is_binary(platform) do
+    platform
+    |> String.trim()
+    |> String.downcase()
+    |> case do
+      "windows" -> true
+      "win32" -> true
+      "windows_cmd" -> true
+      "cmd" -> true
+      _ -> false
+    end
+  end
+
+  defp windows_worker_platform?(_platform), do: false
+
+  defp remote_windows_pilot_contract(worker_host, workspace) do
+    """
+
+    Remote Windows commissioning contract:
+
+    - The orchestrator already routed this work to worker_host=#{worker_host}.
+    - The orchestrator already prepared the remote workspace: #{workspace || "unknown"}.
+    - The Codex app-server for this turn is already remote.
+    - This pilot must not require PowerShell.
+    - Do not run PowerShell commands.
+    - Do not request shell approval for commissioning evidence.
+    - Keep all work inside the prepared workspace using normal workspace file reads/writes.
+    - If a shell command is unavoidable, use only non-administrative cmd.exe semantics; if that would request approval, stop and report BLOCKERS=REQUEST_APPROVAL_REQUIRED.
+    - For a safe commissioning pilot, return the structured result from the issue context and the worker context above instead of probing host identity with shell commands.
+    """
   end
 end
