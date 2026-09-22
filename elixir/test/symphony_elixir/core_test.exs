@@ -1393,9 +1393,12 @@ defmodule SymphonyElixir.CoreTest do
     wrapped = SymphonyElixir.SSH.remote_shell_command(script, :windows_cmd)
 
     assert wrapped =~ "cmd.exe /d /s /c"
-    assert script =~ "mkdir \"C:\\FROTA\\symphony-workspaces\\GH-119\""
-    assert script =~ "cd /d \"C:\\FROTA\\symphony-workspaces\\GH-119\""
+    assert script =~ "mkdir C:\\FROTA\\symphony-workspaces\\GH-119"
+    assert script =~ "cd /d C:\\FROTA\\symphony-workspaces\\GH-119"
     assert script =~ "__SYMPHONY_WORKSPACE__"
+    refute String.contains?(script, "%created%")
+    refute String.contains?(script, "%CD%")
+    refute String.contains?(wrapped, "^\"")
     refute String.contains?(String.downcase(wrapped), "bash")
     refute String.contains?(String.downcase(wrapped), "wsl")
     refute String.contains?(String.downcase(wrapped), "powershell")

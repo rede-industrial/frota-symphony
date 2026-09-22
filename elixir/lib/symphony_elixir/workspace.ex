@@ -519,16 +519,16 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_prepare_script(workspace, :windows_cmd) do
-    quoted_workspace = windows_cmd_quote(workspace)
+    path_arg = windows_cmd_path_arg(workspace)
+    marker = @remote_workspace_marker
 
-    [
-      "set \"workspace=#{workspace}\"",
-      "set \"created=0\"",
-      "if exist #{quoted_workspace}\\* (set \"created=0\") else (if exist #{quoted_workspace} (echo workspace path exists and is not a directory 1>&2 & exit /b 17) else (mkdir #{quoted_workspace} || exit /b 17 & set \"created=1\"))",
-      "cd /d #{quoted_workspace} || exit /b 17",
-      "echo #{@remote_workspace_marker}\t%created%\t%CD%"
-    ]
-    |> Enum.join(" & ")
+    existing_workspace_script =
+      "cd /d #{path_arg} && echo #{marker}\t0\t#{workspace}"
+
+    create_workspace_script =
+      "mkdir #{path_arg} && cd /d #{path_arg} && echo #{marker}\t1\t#{workspace}"
+
+    "if exist #{path_arg}\\NUL (#{existing_workspace_script}) else (if exist #{path_arg} (echo workspace path exists and is not a directory 1>&2 & exit /b 17) else (#{create_workspace_script}))"
   end
 
   defp workspace_prepare_script(workspace, _platform) do
@@ -683,6 +683,14 @@ defmodule SymphonyElixir.Workspace do
 
   defp powershell_single_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "''") <> "'"
+  end
+
+  defp windows_cmd_path_arg(value) when is_binary(value) do
+    if String.match?(value, ~r/[\s&()^%!,;=\[\]{}]/) do
+      windows_cmd_quote(value)
+    else
+      value
+    end
   end
 
   defp windows_cmd_quote(value) when is_binary(value) do
