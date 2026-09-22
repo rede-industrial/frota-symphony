@@ -1375,6 +1375,49 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(backend, state)
   end
 
+  test "windows cmd workers prepare native workspaces without bash or WSL" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/tmp/local-symphony-workspaces",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      worker_workspace_roots: %{"vitoria" => "C:\\FROTA\\symphony-workspaces"}
+    )
+
+    assert {:ok, "C:\\FROTA\\symphony-workspaces\\GH-119"} =
+             Workspace.workspace_path_for_issue_for_test("GH-119", "vitoria")
+
+    script =
+      "C:\\FROTA\\symphony-workspaces\\GH-119"
+      |> Workspace.workspace_prepare_command_for_test(:windows_cmd)
+
+    wrapped = SymphonyElixir.SSH.remote_shell_command(script, :windows_cmd)
+
+    assert wrapped =~ "cmd.exe /d /s /c"
+    assert script =~ "mkdir \"C:\\FROTA\\symphony-workspaces\\GH-119\""
+    assert script =~ "cd /d \"C:\\FROTA\\symphony-workspaces\\GH-119\""
+    assert script =~ "__SYMPHONY_WORKSPACE__"
+    refute String.contains?(String.downcase(wrapped), "bash")
+    refute String.contains?(String.downcase(wrapped), "wsl")
+    refute String.contains?(String.downcase(wrapped), "powershell")
+  end
+
+  test "linux worker prepare keeps the existing bash transport" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      worker_ssh_hosts: ["linux-a"],
+      worker_platforms: %{"linux-a" => "posix"}
+    )
+
+    assert {:ok, "/remote/workspaces/GH-200"} =
+             Workspace.workspace_path_for_issue_for_test("GH-200", "linux-a")
+
+    script = Workspace.workspace_prepare_command_for_test("/remote/workspaces/GH-200", :posix)
+    wrapped = SymphonyElixir.SSH.remote_shell_command(script, :posix)
+
+    assert wrapped =~ "bash -lc"
+    assert script =~ "mkdir -p \"$workspace\""
+  end
+
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],
@@ -1992,7 +2035,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "~/.symphony-remote-workspaces",
-        worker_ssh_hosts: ["worker-a", "worker-b"]
+        worker_ssh_hosts: ["worker-a", "worker-b"],
+        worker_platforms: %{"worker-a" => "posix", "worker-b" => "posix"}
       )
 
       issue = %Issue{

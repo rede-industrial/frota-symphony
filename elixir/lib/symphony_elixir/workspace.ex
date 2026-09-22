@@ -230,7 +230,19 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_path_for_issue(safe_id, worker_host) when is_binary(safe_id) and is_binary(worker_host) do
-    {:ok, Path.join(Config.settings!().workspace.root, safe_id)}
+    platform = worker_platform(worker_host)
+    root = worker_workspace_root(worker_host)
+    {:ok, remote_path_join(root, safe_id, platform)}
+  end
+
+  @doc false
+  @spec workspace_path_for_issue_for_test(String.t(), worker_host()) :: {:ok, Path.t()} | {:error, term()}
+  def workspace_path_for_issue_for_test(safe_id, worker_host), do: workspace_path_for_issue(safe_id, worker_host)
+
+  @doc false
+  @spec workspace_prepare_command_for_test(Path.t(), atom()) :: String.t()
+  def workspace_prepare_command_for_test(workspace, platform) do
+    workspace_prepare_script(workspace, platform)
   end
 
   @doc """
@@ -506,6 +518,19 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.join("; ")
   end
 
+  defp workspace_prepare_script(workspace, :windows_cmd) do
+    quoted_workspace = windows_cmd_quote(workspace)
+
+    [
+      "set \"workspace=#{workspace}\"",
+      "set \"created=0\"",
+      "if exist #{quoted_workspace}\\* (set \"created=0\") else (if exist #{quoted_workspace} (echo workspace path exists and is not a directory 1>&2 & exit /b 17) else (mkdir #{quoted_workspace} || exit /b 17 & set \"created=1\"))",
+      "cd /d #{quoted_workspace} || exit /b 17",
+      "echo #{@remote_workspace_marker}\t%created%\t%CD%"
+    ]
+    |> Enum.join(" & ")
+  end
+
   defp workspace_prepare_script(workspace, _platform) do
     [
       "set -eu",
@@ -531,12 +556,20 @@ defmodule SymphonyElixir.Workspace do
     "if (Test-Path -LiteralPath #{powershell_single_quote(workspace)}) { Remove-Item -LiteralPath #{powershell_single_quote(workspace)} -Recurse -Force }"
   end
 
+  defp remove_workspace_script(workspace, :windows_cmd) do
+    "if exist #{windows_cmd_quote(workspace)} rmdir /s /q #{windows_cmd_quote(workspace)}"
+  end
+
   defp remove_workspace_script(workspace, _platform) do
     [remote_shell_assign("workspace", workspace), "rm -rf \"$workspace\""] |> Enum.join("\n")
   end
 
   defp before_remove_hook_script(command, workspace, :windows) do
     "if (Test-Path -LiteralPath #{powershell_single_quote(workspace)} -PathType Container) { Set-Location -LiteralPath #{powershell_single_quote(workspace)}; #{command} }"
+  end
+
+  defp before_remove_hook_script(command, workspace, :windows_cmd) do
+    "if exist #{windows_cmd_quote(workspace)}\\* (pushd #{windows_cmd_quote(workspace)} && #{command} & popd)"
   end
 
   defp before_remove_hook_script(command, workspace, _platform) do
@@ -552,6 +585,10 @@ defmodule SymphonyElixir.Workspace do
 
   defp hook_script(command, workspace, :windows) do
     "Set-Location -LiteralPath #{powershell_single_quote(workspace)}; #{command}"
+  end
+
+  defp hook_script(command, workspace, :windows_cmd) do
+    "pushd #{windows_cmd_quote(workspace)} && #{command} & popd"
   end
 
   defp hook_script(command, workspace, _platform) do
@@ -571,11 +608,28 @@ defmodule SymphonyElixir.Workspace do
     |> case do
       "windows" -> :windows
       "win32" -> :windows
+      "windows_cmd" -> :windows_cmd
+      "cmd" -> :windows_cmd
       _ -> :posix
     end
   end
 
   defp normalize_worker_platform(_value), do: :posix
+
+  defp worker_workspace_root(worker_host) when is_binary(worker_host) do
+    Config.settings!().worker.workspace_roots
+    |> Map.get(worker_host)
+    |> case do
+      root when is_binary(root) and root != "" -> root
+      _ -> Config.settings!().workspace.root
+    end
+  end
+
+  defp remote_path_join(root, safe_id, platform) when platform in [:windows, :windows_cmd] do
+    String.trim_trailing(root, "\\/") <> "\\" <> safe_id
+  end
+
+  defp remote_path_join(root, safe_id, _platform), do: Path.join(root, safe_id)
 
   defp parse_remote_workspace_output(output) do
     lines = String.split(IO.iodata_to_binary(output), "\n", trim: true)
@@ -629,6 +683,10 @@ defmodule SymphonyElixir.Workspace do
 
   defp powershell_single_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "''") <> "'"
+  end
+
+  defp windows_cmd_quote(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
 
   defp shell_escape(value) when is_binary(value) do

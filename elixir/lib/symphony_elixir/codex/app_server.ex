@@ -1147,6 +1147,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> case do
       "windows" -> :windows
       "win32" -> :windows
+      "windows_cmd" -> :windows
+      "cmd" -> :windows
       _ -> :posix
     end
   end

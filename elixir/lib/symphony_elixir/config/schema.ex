@@ -131,12 +131,13 @@ defmodule SymphonyElixir.Config.Schema do
       field(:ssh_hosts, {:array, :string}, default: [])
       field(:max_concurrent_agents_per_host, :integer)
       field(:platforms, :map, default: %{})
+      field(:workspace_roots, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host, :platforms], empty_values: [])
+      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host, :platforms, :workspace_roots], empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
       |> validate_change(:platforms, fn :platforms, platforms ->
         invalid =
@@ -149,6 +150,19 @@ defmodule SymphonyElixir.Config.Schema do
           []
         else
           [platforms: "must map worker host aliases to posix or windows"]
+        end
+      end)
+      |> validate_change(:workspace_roots, fn :workspace_roots, workspace_roots ->
+        invalid =
+          workspace_roots
+          |> Enum.reject(fn {host, root} ->
+            is_binary(host) and is_binary(root) and String.trim(root) != ""
+          end)
+
+        if invalid == [] do
+          []
+        else
+          [workspace_roots: "must map worker host aliases to non-empty workspace roots"]
         end
       end)
     end

@@ -103,6 +103,7 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          worker_workspace_roots: %{},
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
@@ -148,6 +149,7 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_platforms = Keyword.get(config, :worker_platforms)
+    worker_workspace_roots = Keyword.get(config, :worker_workspace_roots)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
@@ -195,7 +197,7 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
-        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host, worker_platforms),
+        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host, worker_platforms, worker_workspace_roots),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
@@ -291,15 +293,17 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms)
-       when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host) and platforms in [nil, %{}],
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms, workspace_roots)
+       when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host) and platforms in [nil, %{}] and
+              workspace_roots in [nil, %{}],
        do: nil
 
-  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms) do
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms, workspace_roots) do
     [
       "worker:",
       ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
       platforms not in [nil, %{}] && "  platforms: #{yaml_value(platforms)}",
+      workspace_roots not in [nil, %{}] && "  workspace_roots: #{yaml_value(workspace_roots)}",
       !is_nil(max_concurrent_agents_per_host) &&
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
     ]
