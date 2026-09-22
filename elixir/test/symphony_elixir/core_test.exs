@@ -1140,6 +1140,33 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, nil) == "carla"
   end
 
+  test "pilot mode skips startup terminal workspace cleanup" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["issue-pilot-cleanup"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla", "vitoria"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    refute Orchestrator.startup_terminal_workspace_cleanup_enabled_for_test()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: false,
+      worker_ssh_hosts: ["carla", "vitoria"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    assert Orchestrator.startup_terminal_workspace_cleanup_enabled_for_test()
+  end
+
   test "pilot mode can ignore retries after worker exit" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
