@@ -520,15 +520,33 @@ defmodule SymphonyElixir.Workspace do
 
   defp workspace_prepare_script(workspace, :windows_cmd) do
     path_arg = windows_cmd_path_arg(workspace)
+    path_quoted = windows_cmd_quote(workspace)
     marker = @remote_workspace_marker
+    sentinel = ".symphony-workspace"
+    expected_origin = expected_git_origin_from_after_create()
 
-    existing_workspace_script =
-      "cd /d #{path_arg} && echo #{marker}\t0\t#{workspace}"
+    reusable_git_workspace_script =
+      windows_cmd_reusable_git_workspace_script(workspace, expected_origin)
+
+    mark_workspace_script =
+      "echo prepared-by=symphony>#{path_arg}\\#{sentinel}"
 
     create_workspace_script =
-      "mkdir #{path_arg} && cd /d #{path_arg} && echo #{marker}\t1\t#{workspace}"
+      "mkdir #{path_arg} && #{mark_workspace_script} && cd /d #{path_arg} && echo #{marker}\t1\t#{workspace}"
 
-    "if exist #{path_arg}\\NUL (#{existing_workspace_script}) else (if exist #{path_arg} (echo workspace path exists and is not a directory 1>&2 & exit /b 17) else (#{create_workspace_script}))"
+    recreate_marked_partial_workspace_script =
+      "rmdir /s /q #{path_arg} && mkdir #{path_arg} && #{mark_workspace_script} && cd /d #{path_arg} && echo #{marker}\t1\t#{workspace}"
+
+    empty_workspace_script =
+      "#{mark_workspace_script} && cd /d #{path_arg} && echo #{marker}\t1\t#{workspace}"
+
+    marked_partial_script =
+      "if exist #{path_arg}\\#{sentinel} (#{recreate_marked_partial_workspace_script}) else (echo workspace exists and is not an initialized Symphony workspace; refusing to clean 1>&2 & exit /b 17)"
+
+    existing_directory_script =
+      "if exist #{path_arg}\\.git\\NUL (#{reusable_git_workspace_script}) else (dir /a /b #{path_quoted} 2>nul | findstr . >nul && (#{marked_partial_script}) || (#{empty_workspace_script}))"
+
+    "if exist #{path_arg}\\NUL (#{existing_directory_script}) else (if exist #{path_arg} (echo workspace path exists and is not a directory 1>&2 & exit /b 17) else (#{create_workspace_script}))"
   end
 
   defp workspace_prepare_script(workspace, _platform) do
@@ -696,6 +714,58 @@ defmodule SymphonyElixir.Workspace do
   defp windows_cmd_quote(value) when is_binary(value) do
     "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
+
+  defp windows_cmd_reusable_git_workspace_script(workspace, nil) do
+    path_arg = windows_cmd_path_arg(workspace)
+    "cd /d #{path_arg} && echo #{@remote_workspace_marker}\t0\t#{workspace}"
+  end
+
+  defp windows_cmd_reusable_git_workspace_script(workspace, expected_origin) when is_binary(expected_origin) do
+    path_arg = windows_cmd_path_arg(workspace)
+    origin_arg = windows_cmd_findstr_literal(expected_origin)
+
+    "git -C #{path_arg} config --get remote.origin.url | findstr /x /c:#{origin_arg} >nul && (cd /d #{path_arg} && echo #{@remote_workspace_marker}\t0\t#{workspace}) || (echo workspace git origin mismatch; refusing to reuse 1>&2 & exit /b 17)"
+  end
+
+  defp windows_cmd_findstr_literal(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+  end
+
+  defp expected_git_origin_from_after_create do
+    Config.settings!().hooks.after_create
+    |> extract_git_clone_origin()
+  rescue
+    _ -> nil
+  end
+
+  defp extract_git_clone_origin(command) when is_binary(command) do
+    command
+    |> command_words()
+    |> find_git_clone_origin()
+  end
+
+  defp extract_git_clone_origin(_command), do: nil
+
+  defp command_words(command) do
+    ~r/"([^"]*)"|'([^']*)'|(\S+)/
+    |> Regex.scan(command)
+    |> Enum.map(fn
+      [_match, double, "", ""] -> double
+      [_match, "", single, ""] -> single
+      [_match, "", "", bare] -> bare
+    end)
+  end
+
+  defp find_git_clone_origin(["git", "clone" | args]), do: git_clone_origin_arg(args)
+  defp find_git_clone_origin([_word | rest]), do: find_git_clone_origin(rest)
+  defp find_git_clone_origin([]), do: nil
+
+  defp git_clone_origin_arg(["--depth", _value | rest]), do: git_clone_origin_arg(rest)
+  defp git_clone_origin_arg(["--branch", _value | rest]), do: git_clone_origin_arg(rest)
+  defp git_clone_origin_arg(["-b", _value | rest]), do: git_clone_origin_arg(rest)
+  defp git_clone_origin_arg([<<"--", _rest::binary>> | rest]), do: git_clone_origin_arg(rest)
+  defp git_clone_origin_arg([repo | _rest]) when is_binary(repo) and repo != ".", do: repo
+  defp git_clone_origin_arg(_args), do: nil
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

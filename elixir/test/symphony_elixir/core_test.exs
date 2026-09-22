@@ -1380,7 +1380,8 @@ defmodule SymphonyElixir.CoreTest do
       workspace_root: "/tmp/local-symphony-workspaces",
       worker_ssh_hosts: ["vitoria"],
       worker_platforms: %{"vitoria" => "windows_cmd"},
-      worker_workspace_roots: %{"vitoria" => "C:\\FROTA\\symphony-workspaces"}
+      worker_workspace_roots: %{"vitoria" => "C:\\FROTA\\symphony-workspaces"},
+      hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
     )
 
     assert {:ok, "C:\\FROTA\\symphony-workspaces\\GH-119"} =
@@ -1396,9 +1397,14 @@ defmodule SymphonyElixir.CoreTest do
     assert script =~ "mkdir C:\\FROTA\\symphony-workspaces\\GH-119"
     assert script =~ "cd /d C:\\FROTA\\symphony-workspaces\\GH-119"
     assert script =~ "__SYMPHONY_WORKSPACE__"
+    assert script =~ ".symphony-workspace"
+    assert script =~ "rmdir /s /q C:\\FROTA\\symphony-workspaces\\GH-119"
+    assert script =~ "workspace exists and is not an initialized Symphony workspace"
+    assert script =~ "git -C C:\\FROTA\\symphony-workspaces\\GH-119 config --get remote.origin.url"
+    assert script =~ "findstr /x /c:\"https://github.com/rede-industrial/frota-control-center.git\""
+    refute String.contains?(script, "rmdir /s /q C:\\FROTA\\symphony-workspaces ")
     refute String.contains?(script, "%created%")
     refute String.contains?(script, "%CD%")
-    refute String.contains?(wrapped, "^\"")
     refute String.contains?(String.downcase(wrapped), "bash")
     refute String.contains?(String.downcase(wrapped), "wsl")
     refute String.contains?(String.downcase(wrapped), "powershell")
