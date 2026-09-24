@@ -602,6 +602,13 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp hook_script(command, workspace, :windows) do
+    command =
+      if windows_m2m_clone_hook?(command) do
+        windows_m2m_clone_script(github_tracker_repo())
+      else
+        command
+      end
+
     "Set-Location -LiteralPath #{powershell_single_quote(workspace)}; #{command}"
   end
 
@@ -717,7 +724,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remote_hook_ssh_opts("after_create", command) when is_binary(command) do
-    if String.contains?(command, "FROTA_GITHUB_M2M_STDIN") do
+    if m2m_token_hook?(command) do
       case issue_github_m2m_token() do
         {:ok, token} -> {:ok, [input: token <> "\n"]}
         {:error, reason} -> {:error, reason}
@@ -728,6 +735,120 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remote_hook_ssh_opts(_hook_name, _command), do: {:ok, []}
+
+  defp m2m_token_hook?(command) when is_binary(command) do
+    String.contains?(command, "FROTA_GITHUB_M2M_STDIN") or windows_m2m_clone_hook?(command)
+  end
+
+  defp windows_m2m_clone_hook?(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> String.starts_with?("FROTA_WINDOWS_M2M_CLONE")
+  end
+
+  defp windows_m2m_clone_script(repo) when is_binary(repo) do
+    escaped_repo = powershell_single_quote(repo)
+
+    """
+    $env:FROTA_GITHUB_M2M_STDIN = '1'
+    $ErrorActionPreference = 'Stop'
+    $token = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($token)) { throw 'missing token on stdin' }
+
+    $repo = #{escaped_repo}
+    $repoUrl = "https://github.com/$repo.git"
+    $target = (Get-Location).Path
+    $tmp = Join-Path $env:TEMP ('frota-m2m-clone-' + [guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    $helperWin = Join-Path $tmp 'git-credential-frota-m2m.sh'
+    $markerWin = Join-Path $tmp 'helper.invoked'
+
+    function To-Posix([string]$path) {
+      $slash = $path -replace '\\\\','/'
+      return (& 'C:\\Program Files\\Git\\usr\\bin\\sh.exe' -lc "cygpath -u '$slash'").Trim()
+    }
+
+    function ConvertTo-WindowsArgument([string]$value) {
+      if ($value -notmatch '[\\s"]') { return $value }
+      $escaped = $value -replace '(\\\\*)"', '$1$1\\"'
+      $escaped = $escaped -replace '(\\\\+)$', '$1$1'
+      return '"' + $escaped + '"'
+    }
+
+    $helperPosix = To-Posix $helperWin
+    $markerPosix = To-Posix $markerWin
+    $helper = @"
+    #!/bin/sh
+    printf 'invoked:%s\\n' "`$1" > '$markerPosix'
+    if [ "`$1" = "get" ]; then
+      printf 'username=x-access-token\\n'
+      printf 'password=%s\\n\\n' "`$FROTA_GITHUB_M2M_TOKEN"
+    fi
+    exit 0
+    "@
+
+    try {
+      Set-Content -Path $helperWin -Value $helper -NoNewline -Encoding Ascii
+      $env:GIT_TERMINAL_PROMPT = '0'
+      $env:FROTA_GITHUB_M2M_TOKEN = $token
+      $fmt = "!sh '$helperPosix'"
+
+      'protocol=https' + [Environment]::NewLine + 'host=github.com' + [Environment]::NewLine + [Environment]::NewLine |
+        git -c credential.interactive=false -c credential.helper= -c credential.helper=$fmt credential fill | Out-Null
+
+      if (-not (Test-Path -LiteralPath $markerWin)) { throw 'credential helper was not invoked' }
+      Write-Output 'CREDENTIAL_HELPER_INVOKED=TRUE'
+
+      $gitArgs = @(
+        '-c', 'credential.interactive=false',
+        '-c', 'credential.helper=',
+        '-c', "credential.helper=$fmt",
+        'clone',
+        $repoUrl,
+        $target
+      )
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = 'C:\\Program Files\\Git\\cmd\\git.exe'
+      $psi.Arguments = ($gitArgs | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' '
+      $psi.UseShellExecute = $false
+      $psi.CreateNoWindow = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError = $true
+      $psi.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
+      $psi.EnvironmentVariables['FROTA_GITHUB_M2M_TOKEN'] = $token
+
+      $process = New-Object System.Diagnostics.Process
+      $process.StartInfo = $psi
+      [void] $process.Start()
+      $gitStdout = $process.StandardOutput.ReadToEnd()
+      $gitStderr = $process.StandardError.ReadToEnd()
+      $process.WaitForExit()
+      $cloneExitCode = $process.ExitCode
+
+      Write-Output 'GIT_PROCESS_INVOCATION=PASS'
+      Write-Output ('GIT_EXIT_CODE=' + $cloneExitCode)
+      if ($gitStdout) {
+        ($gitStdout -split "`r?`n") | Where-Object { $_ } | ForEach-Object { $_ -replace 'ghs_[A-Za-z0-9_]+','<TOKEN>' }
+      }
+      if ($gitStderr) {
+        ($gitStderr -split "`r?`n") | Where-Object { $_ } | ForEach-Object { $_ -replace 'ghs_[A-Za-z0-9_]+','<TOKEN>' }
+      }
+      if ($cloneExitCode -ne 0) { throw ('git clone failed: ' + $cloneExitCode) }
+
+      Write-Output 'GIT_CLONE=PASS'
+    } finally {
+      Remove-Item Env:\\FROTA_GITHUB_M2M_TOKEN -ErrorAction SilentlyContinue
+      Remove-Item Env:\\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $helperWin -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $markerWin -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $tmp -Force -Recurse -ErrorAction SilentlyContinue
+      Write-Output ('TEMP_HELPER_REMOVED=' + (-not (Test-Path -LiteralPath $helperWin)))
+      Write-Output ('TEMP_DIR_REMOVED=' + (-not (Test-Path -LiteralPath $tmp)))
+      Write-Output ('TOKEN_ENV_REMOVED=' + (-not (Test-Path Env:\\FROTA_GITHUB_M2M_TOKEN)))
+    }
+    """
+  end
 
   defp issue_github_m2m_token do
     repo = github_tracker_repo()

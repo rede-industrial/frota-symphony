@@ -332,7 +332,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "remote after_create hook marked for GitHub M2M receives token on ssh stdin" do
+  test "canonical Windows M2M clone hook receives token on ssh stdin" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -363,7 +363,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         worker_ssh_hosts: ["gabriela"],
         worker_platforms: %{"gabriela" => "windows"},
         worker_workspace_roots: %{"gabriela" => "C:\\FROTA\\symphony-workspaces"},
-        hook_after_create: "$env:FROTA_GITHUB_M2M_STDIN = '1'; Write-Output 'clone'"
+        hook_after_create: "FROTA_WINDOWS_M2M_CLONE"
       )
 
       assert {:ok, _workspace} = Workspace.create_for_issue("GH-124", "gabriela")
@@ -374,7 +374,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       [prepare_argv, _prepare_stdin, hook_argv | _] = String.split(trace, "\n", trim: true)
       refute prepare_argv =~ "dummy-installation-token"
       refute hook_argv =~ "dummy-installation-token"
-      refute hook_argv =~ "Write-Output 'clone'"
+      refute hook_argv =~ "git.exe"
+      refute hook_argv =~ "frota-control-center"
 
       assert File.read!(Path.join(test_root, "token-client.args")) ==
                "issue --repo rede-industrial/frota-control-center\n"
