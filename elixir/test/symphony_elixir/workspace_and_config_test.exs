@@ -332,6 +332,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "canonical Windows M2M clone hook receives token on ssh stdin" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-m2m-hook-#{System.unique_integer([:positive])}"
+      )
+
+    trace_file = Path.join(test_root, "ssh.trace")
+    token_client = Path.join(test_root, "token-client")
+    previous_path = System.get_env("PATH")
+    previous_token_client = System.get_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT")
+    previous_github_repo = System.get_env("GITHUB_REPO")
+
+    try do
+      File.mkdir_p!(test_root)
+      install_fake_ssh!(test_root, trace_file)
+
+      File.write!(token_client, """
+      #!/bin/sh
+      printf '%s\\n' "$*" > "#{Path.join(test_root, "token-client.args")}"
+      printf 'dummy-installation-token\\n'
+      """)
+
+      File.chmod!(token_client, 0o755)
+      System.put_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT", token_client)
+      System.put_env("GITHUB_REPO", "rede-industrial/frota-control-center")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        worker_ssh_hosts: ["gabriela"],
+        worker_platforms: %{"gabriela" => "windows"},
+        worker_workspace_roots: %{"gabriela" => "C:\\FROTA\\symphony-workspaces"},
+        hook_after_create: "FROTA_WINDOWS_M2M_CLONE"
+      )
+
+      assert {:ok, _workspace} = Workspace.create_for_issue("GH-124", "gabriela")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "STDIN2:dummy-installation-token"
+
+      [prepare_argv, _prepare_stdin, hook_argv | _] = String.split(trace, "\n", trim: true)
+      refute prepare_argv =~ "dummy-installation-token"
+      refute hook_argv =~ "dummy-installation-token"
+      refute hook_argv =~ "git.exe"
+      refute hook_argv =~ "frota-control-center"
+
+      assert File.read!(Path.join(test_root, "token-client.args")) ==
+               "issue --repo rede-industrial/frota-control-center\n"
+    after
+      restore_env("PATH", previous_path)
+      restore_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT", previous_token_client)
+      restore_env("GITHUB_REPO", previous_github_repo)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace surfaces after_create hook timeouts" do
     workspace_root =
       Path.join(
@@ -1598,6 +1653,507 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
+  test "remote windows workspace prepare runs after_create for newly prepared workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-new-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="$trace_file.count"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+        exit 0
+      fi
+
+      if [ "$count" -eq 2 ]; then
+        printf 'after_create ok\n'
+        exit 0
+      fi
+
+      printf 'unexpected extra call\n' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("GH-117", "carla")
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace rerun reuses valid existing git workspace without after_create" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-rerun-existing-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="$trace_file.count"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '0' '#{workspace_path}'
+        exit 0
+      fi
+
+      printf 'unexpected hook call\n' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("GH-117", "carla")
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare fails closed for unknown non-empty workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-unknown-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+      printf 'workspace exists and is not empty; refusing to run after_create\n' >&2
+      exit 17
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:error, {:workspace_prepare_failed, "carla", 17, output}} =
+               Workspace.create_for_issue("GH-117", "carla")
+
+      assert output =~ "workspace exists and is not empty"
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare cleans only marked partial workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-marked-partial-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-121"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="$trace_file.count"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+        exit 0
+      fi
+
+      if [ "$count" -eq 2 ]; then
+        printf 'after_create ok\n'
+        exit 0
+      fi
+
+      printf 'unexpected extra call\n' >&2
+      exit 42
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows_cmd"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("GH-121", "vitoria")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "rmdir /s /q C:\\FROTA\\symphony-workspaces\\GH-121"
+      assert trace =~ "C:\\FROTA\\symphony-workspaces\\GH-121\\.symphony-workspace"
+      assert trace =~ "workspace exists and is not an initialized Symphony workspace"
+      refute trace =~ "rmdir /s /q C:\\FROTA\\symphony-workspaces "
+      refute String.contains?(String.downcase(trace), "bash")
+      refute String.contains?(String.downcase(trace), "wsl")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare fails closed for incompatible git workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-incompatible-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+      printf 'workspace git origin mismatch; refusing to reuse\n' >&2
+      exit 17
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\symphony-workspaces",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows_cmd"},
+        hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+      )
+
+      assert {:error, {:workspace_prepare_failed, "vitoria", 17, output}} =
+               Workspace.create_for_issue("GH-121", "vitoria")
+
+      assert output =~ "workspace git origin mismatch"
+      assert File.read!(trace_file) |> String.split("\n", trim: true) |> length() == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace lifecycle uses PowerShell encoded commands when configured" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-remote-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "C:\\FROTA\\workspace with spaces"
+      workspace_path = "C:\\FROTA\\workspace with spaces\\MT-SSH-WIN"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\n' "$*" >> "$trace_file"
+
+      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"},
+        hook_before_run: "echo before-run",
+        hook_after_run: "echo after-run",
+        hook_before_remove: "echo before-remove"
+      )
+
+      assert Config.settings!().worker.platforms == %{"vitoria" => "windows"}
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WIN", "vitoria")
+      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WIN", "vitoria")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "vitoria powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand"
+      assert length(Regex.scan(~r/EncodedCommand/, trace)) >= 4
+      refute trace =~ "cmd.exe"
+      refute trace =~ "bash -lc"
+      refute trace =~ "C:\\FROTA\\workspace"
+      refute trace =~ "MT-SSH-WIN"
+      refute trace =~ "echo before-run"
+      refute trace =~ "echo after-run"
+      refute trace =~ "echo before-remove"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare trims CRLF line endings from marker path" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-crlf-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      count_file = Path.join(test_root, "ssh.count")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "C:\\FROTA\\symphony-workspaces"
+      workspace_path = "C:\\FROTA\\symphony-workspaces\\GH-117"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      count_file="#{count_file}"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      printf 'CALL:%s\n' "$*" >> "$trace_file"
+
+      if [ "$count" -eq 1 ]; then
+        printf '%s\t%s\t%s\r\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+      fi
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["carla"],
+        worker_platforms: %{"carla" => "windows"},
+        hook_after_create: "git status --short"
+      )
+
+      assert {:ok, returned_workspace} = Workspace.create_for_issue("GH-117", "carla")
+      assert returned_workspace == workspace_path
+      refute String.ends_with?(returned_workspace, <<13>>)
+      assert File.read!(count_file) == "2"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare rejects empty marker output" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-empty-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+    end)
+
+    try do
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\workspace",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"}
+      )
+
+      assert {:error, {:workspace_prepare_failed, :invalid_output, ""}} =
+               Workspace.create_for_issue("MT-SSH-WIN-EMPTY", "vitoria")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote windows workspace prepare rejects invalid marker output" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-windows-invalid-prepare-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+    end)
+
+    try do
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' '__SYMPHONY_WORKSPACE__\tmaybe\t'
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "C:\\FROTA\\workspace",
+        worker_ssh_hosts: ["vitoria"],
+        worker_platforms: %{"vitoria" => "windows"}
+      )
+
+      assert {:error, {:workspace_prepare_failed, :invalid_output, output}} =
+               Workspace.create_for_issue("MT-SSH-WIN-INVALID", "vitoria")
+
+      assert output =~ "__SYMPHONY_WORKSPACE__"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "remote workspace lifecycle uses ssh host aliases from worker config" do
     test_root =
       Path.join(
@@ -1667,5 +2223,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp install_fake_ssh!(test_root, trace_file) do
+    fake_ssh = Path.join(test_root, "ssh")
+    previous_path = System.get_env("PATH")
+
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    File.write!(fake_ssh, """
+    #!/bin/bash
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    if IFS= read -r -t 1 stdin; then
+      :
+    else
+      stdin=""
+    fi
+    if IFS= read -r -t 1 stdin2; then
+      :
+    else
+      stdin2=""
+    fi
+    printf 'STDIN:%s\\n' "$stdin" >> "#{trace_file}"
+    printf 'STDIN2:%s\\n' "$stdin2" >> "#{trace_file}"
+    printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' 'C:\\FROTA\\symphony-workspaces\\GH-124'
+    exit 0
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
   end
 end

@@ -67,6 +67,34 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "echo ready"
   end
 
+  test "run/3 sends input to ssh stdin without appending it to arguments" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-stdin-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    IFS= read -r stdin
+    printf 'STDIN:%s\\n' "$stdin" >> "#{trace_file}"
+    exit 0
+    """)
+
+    assert {:ok, {"", 0}} =
+             SSH.run("localhost", "printf ok", input: "dummy-token\n", stderr_to_stdout: true)
+
+    trace = File.read!(trace_file)
+    assert trace =~ "STDIN:dummy-token"
+
+    [argv_line | _] = String.split(trace, "\n", trim: true)
+    refute argv_line =~ "dummy-token"
+  end
+
   test "run/3 keeps the user prefix when parsing user@host:port targets" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-user-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -160,6 +188,36 @@ defmodule SymphonyElixir.SSHTest do
   test "remote_shell_command/1 escapes embedded single quotes" do
     assert SSH.remote_shell_command("printf 'hello'") ==
              "bash -lc 'printf '\"'\"'hello'\"'\"''"
+  end
+
+  test "remote_shell_command/2 wraps windows commands in PowerShell encoded command" do
+    command = "Set-Location -LiteralPath 'C:\\FROTA\\workspace with spaces'; echo ok"
+
+    shell = SSH.remote_shell_command(command, :windows)
+
+    assert shell =~ "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+    refute shell =~ command
+
+    encoded =
+      shell
+      |> String.split(" -EncodedCommand ", parts: 2)
+      |> List.last()
+
+    assert encoded
+           |> Base.decode64!()
+           |> :unicode.characters_to_binary({:utf16, :little}, :utf8) == command
+  end
+
+  test "remote_shell_command/2 wraps windows cmd transport without PowerShell encoded command" do
+    command = ~S(pushd "C:\FROTA\workspace with spaces" && "C:\Program Files\OpenAI Codex\codex.exe" app-server)
+
+    shell = SSH.remote_shell_command(command, :windows_cmd)
+
+    assert shell =~ ~S(cmd.exe /d /s /c ")
+    assert shell =~ ~S(pushd ^"C:\FROTA\workspace with spaces^")
+    assert shell =~ ~S(^"C:\Program Files\OpenAI Codex\codex.exe^" app-server)
+    refute shell =~ "powershell"
+    refute shell =~ "EncodedCommand"
   end
 
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do

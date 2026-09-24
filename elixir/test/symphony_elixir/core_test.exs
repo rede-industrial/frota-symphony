@@ -359,6 +359,7 @@ defmodule SymphonyElixir.CoreTest do
 
     hook_marker = Path.join(test_root, "before-run-started")
     hook_fifo = Path.join(test_root, "before-run-blocker")
+    hook_pids = Path.join(test_root, "before-run-pids")
     runtime_supervisor_name = Module.concat(__MODULE__, "AgentRuntimeSupervisor#{issue_suffix}")
     task_supervisor_name = Module.concat(__MODULE__, "TaskSupervisor#{issue_suffix}")
     orchestrator_name = Module.concat(__MODULE__, "RestartOrchestrator#{issue_suffix}")
@@ -377,10 +378,14 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     on_exit(fn ->
+      release_fifo_reader(hook_fifo)
+
       if pid = Process.whereis(runtime_supervisor_name) do
         GenServer.stop(pid)
       end
 
+      terminate_recorded_pids(hook_pids)
+      terminate_test_root_processes(test_root)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restart_default_runtime!()
       File.rm_rf(test_root)
@@ -398,7 +403,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_kind: "memory",
       workspace_root: test_root,
       poll_interval_ms: 10,
-      hook_before_run: "mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
+      hook_before_run: "echo $$ >> \"#{hook_pids}\"; [ -p \"#{hook_fifo}\" ] || mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
       hook_timeout_ms: 60_000
     )
 
@@ -1099,6 +1104,125 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 39_500, 40_500)
   end
 
+  test "pilot mode dispatches only the allowlisted issue and capability" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["101"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    allowed = %Issue{
+      id: "101",
+      identifier: "GH-101",
+      title: "Pilot issue",
+      state: "Todo",
+      labels: ["p0-factory-loop-1x1-20260921", "capability:backend-engineering"],
+      dispatchable: true
+    }
+
+    wrong_issue = %{allowed | id: "102", identifier: "GH-102"}
+    wrong_capability = %{allowed | labels: ["p0-factory-loop-1x1-20260921", "capability:frontend-engineering"]}
+    missing_pilot_label = %{allowed | labels: ["capability:backend-engineering"]}
+
+    assert Orchestrator.should_dispatch_issue_for_test(allowed, state)
+    refute Orchestrator.should_dispatch_issue_for_test(wrong_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(wrong_capability, state)
+    refute Orchestrator.should_dispatch_issue_for_test(missing_pilot_label, state)
+    assert Orchestrator.select_worker_host_for_test(state, nil) == "carla"
+  end
+
+  test "pilot mode skips startup terminal workspace cleanup" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["issue-pilot-cleanup"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla", "vitoria"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    refute Orchestrator.startup_terminal_workspace_cleanup_enabled_for_test()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: false,
+      worker_ssh_hosts: ["carla", "vitoria"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    assert Orchestrator.startup_terminal_workspace_cleanup_enabled_for_test()
+  end
+
+  test "pilot mode blocks failed worker exits instead of retrying" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_enabled: true,
+      pilot_issue_ids: ["issue-pilot-retry"],
+      pilot_required_labels: ["p0-factory-loop-1x1-20260921"],
+      pilot_capabilities: ["BACKEND_ENGINEERING"],
+      pilot_worker_host: "carla",
+      pilot_ignore_retries: true,
+      worker_ssh_hosts: ["carla"],
+      worker_max_concurrent_agents_per_host: 1,
+      max_concurrent_agents: 1
+    )
+
+    issue_id = "issue-pilot-retry"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :PilotRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "GH-101",
+      issue: %Issue{id: issue_id, identifier: "GH-101", state: "open"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :boom})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert state.retry_attempts == %{}
+    assert MapSet.member?(state.claimed, issue_id)
+    assert state.running == %{}
+    assert %{
+             issue_id: ^issue_id,
+             identifier: "GH-101",
+             error: "agent exited: :boom"
+           } = state.blocked[issue_id]
+  end
+
   test "first abnormal worker exit waits before retrying" do
     issue_id = "issue-crash-initial"
     ref = make_ref()
@@ -1139,6 +1263,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1208,6 +1334,132 @@ defmodule SymphonyElixir.CoreTest do
     assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
   end
 
+  test "canonical routing maps capabilities to exact remote workers and denies unknowns" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    routing_file = Path.join(workflow_dir, "canonical-routing.json")
+
+    File.write!(
+      routing_file,
+      Jason.encode!(%{
+        "remote_destinations" => %{
+          "vitoria" => %{"host_alias" => "vitoria"},
+          "carla" => %{"host_alias" => "carla"},
+          "pedro" => %{"host_alias" => "pedro"}
+        },
+        "routes" => [
+          %{"capability" => "FRONTEND_ENGINEERING", "destination_id" => "vitoria"},
+          %{"capability" => "BACKEND_ENGINEERING", "destination_id" => "carla"},
+          %{"capability" => "INFRA_DEVOPS", "destination_id" => "pedro"}
+        ]
+      })
+    )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["symphony-safe-pilot-20260911"],
+      worker_ssh_hosts: ["vitoria", "carla", "pedro"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    frontend = routed_issue("frontend", "capability:frontend-engineering")
+    backend = routed_issue("backend", "capability:backend-engineering")
+    infra = routed_issue("infra", "capability:infra-devops")
+    unknown = routed_issue("unknown", "capability:unknown")
+
+    assert Orchestrator.routed_worker_host_for_test(state, frontend) == "vitoria"
+    assert Orchestrator.routed_worker_host_for_test(state, backend) == "carla"
+    assert Orchestrator.routed_worker_host_for_test(state, infra) == "pedro"
+    assert Orchestrator.routed_worker_host_for_test(state, unknown) == {:deny, :unknown_capability}
+
+    assert Orchestrator.should_dispatch_issue_for_test(frontend, state)
+    refute Orchestrator.should_dispatch_issue_for_test(unknown, state)
+  end
+
+  test "canonical routing denies missing destinations and prevents local fallback" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    routing_file = Path.join(workflow_dir, "canonical-routing.json")
+
+    File.write!(
+      routing_file,
+      Jason.encode!(%{
+        "remote_destinations" => %{"vitoria" => %{"host_alias" => "vitoria"}},
+        "routes" => [
+          %{"capability" => "FRONTEND_ENGINEERING", "destination_id" => "missing-worker"},
+          %{"capability" => "BACKEND_ENGINEERING"}
+        ]
+      })
+    )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_labels: ["symphony-safe-pilot-20260911"],
+      worker_ssh_hosts: [],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 1}
+
+    frontend = routed_issue("frontend", "capability:frontend-engineering")
+    backend = routed_issue("backend", "capability:backend-engineering")
+
+    assert Orchestrator.routed_worker_host_for_test(state, frontend) == {:deny, :unknown_worker}
+    assert Orchestrator.routed_worker_host_for_test(state, backend) == {:deny, :missing_destination}
+    refute Orchestrator.should_dispatch_issue_for_test(frontend, state)
+    refute Orchestrator.should_dispatch_issue_for_test(backend, state)
+  end
+
+  test "windows cmd workers prepare native workspaces without bash or WSL" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/tmp/local-symphony-workspaces",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      worker_workspace_roots: %{"vitoria" => "C:\\FROTA\\symphony-workspaces"},
+      hook_after_create: "git clone https://github.com/rede-industrial/frota-control-center.git ."
+    )
+
+    assert {:ok, "C:\\FROTA\\symphony-workspaces\\GH-119"} =
+             Workspace.workspace_path_for_issue_for_test("GH-119", "vitoria")
+
+    script =
+      "C:\\FROTA\\symphony-workspaces\\GH-119"
+      |> Workspace.workspace_prepare_command_for_test(:windows_cmd)
+
+    wrapped = SymphonyElixir.SSH.remote_shell_command(script, :windows_cmd)
+
+    assert wrapped =~ "cmd.exe /d /s /c"
+    assert script =~ "mkdir C:\\FROTA\\symphony-workspaces\\GH-119"
+    assert script =~ "cd /d C:\\FROTA\\symphony-workspaces\\GH-119"
+    assert script =~ "__SYMPHONY_WORKSPACE__"
+    assert script =~ ".symphony-workspace"
+    assert script =~ "rmdir /s /q C:\\FROTA\\symphony-workspaces\\GH-119"
+    assert script =~ "workspace exists and is not an initialized Symphony workspace"
+    assert script =~ "git -C C:\\FROTA\\symphony-workspaces\\GH-119 config --get remote.origin.url"
+    assert script =~ "findstr /x /c:\"https://github.com/rede-industrial/frota-control-center.git\""
+    refute String.contains?(script, "rmdir /s /q C:\\FROTA\\symphony-workspaces ")
+    refute String.contains?(script, "%created%")
+    refute String.contains?(script, "%CD%")
+    refute String.contains?(String.downcase(wrapped), "bash")
+    refute String.contains?(String.downcase(wrapped), "wsl")
+    refute String.contains?(String.downcase(wrapped), "powershell")
+  end
+
+  test "linux worker prepare keeps the existing bash transport" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      worker_ssh_hosts: ["linux-a"],
+      worker_platforms: %{"linux-a" => "posix"}
+    )
+
+    assert {:ok, "/remote/workspaces/GH-200"} =
+             Workspace.workspace_path_for_issue_for_test("GH-200", "linux-a")
+
+    script = Workspace.workspace_prepare_command_for_test("/remote/workspaces/GH-200", :posix)
+    wrapped = SymphonyElixir.SSH.remote_shell_command(script, :posix)
+
+    assert wrapped =~ "bash -lc"
+    assert script =~ "mkdir -p \"$workspace\""
+  end
+
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],
@@ -1255,11 +1507,82 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  defp routed_issue(id, capability_label) do
+    %Issue{
+      id: id,
+      identifier: "GH-#{id}",
+      title: "Routed #{id}",
+      state: "Todo",
+      labels: ["symphony-safe-pilot-20260911", capability_label],
+      dispatchable: true
+    }
+  end
+
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
     assert remaining_ms >= min_remaining_ms
     assert remaining_ms <= max_remaining_ms
+  end
+
+  defp release_fifo_reader(path) do
+    if File.exists?(path) do
+      task =
+        Task.async(fn ->
+          File.write(path, "\n")
+        end)
+
+      Task.yield(task, 100) || Task.shutdown(task, :brutal_kill)
+    end
+
+    :ok
+  end
+
+  defp terminate_recorded_pids(path) do
+    path
+    |> read_recorded_pids()
+    |> Enum.each(&terminate_recorded_pid/1)
+  end
+
+  defp read_recorded_pids(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        contents
+        |> String.split()
+        |> Enum.flat_map(fn value ->
+          case Integer.parse(value) do
+            {pid, ""} -> [pid]
+            _ -> []
+          end
+        end)
+        |> Enum.uniq()
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp terminate_recorded_pid(pid) when is_integer(pid) do
+    System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  end
+
+  defp terminate_test_root_processes(test_root) do
+    case System.cmd("pgrep", ["-f", test_root], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split()
+        |> Enum.flat_map(fn value ->
+          case Integer.parse(value) do
+            {pid, ""} -> [pid]
+            _ -> []
+          end
+        end)
+        |> Enum.each(&terminate_recorded_pid/1)
+
+      {_output, _status} ->
+        :ok
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -1535,6 +1858,75 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt == "Retry #2"
   end
 
+  test "prompt builder adds remote windows pilot contract without weakening approval policy" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Handle {{ issue.identifier }} on {{ worker.host }} in {{ worker.workspace }}.",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      pilot_enabled: true,
+      pilot_issue_ids: ["120"],
+      pilot_required_labels: ["symphony-safe-pilot-20260911"],
+      pilot_capabilities: ["FRONTEND_ENGINEERING"],
+      pilot_worker_host: "vitoria",
+      codex_approval_policy: "on-request",
+      codex_thread_sandbox: "workspace-write"
+    )
+
+    issue = %Issue{
+      identifier: "GH-120",
+      title: "Vitoria commissioning",
+      description: "Produce structured proof without privileged commands.",
+      state: "open",
+      url: "https://github.com/rede-industrial/frota-control-center/issues/120",
+      labels: ["symphony-safe-pilot-20260911", "capability:frontend-engineering"]
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        worker_host: "vitoria",
+        workspace: "C:\\FROTA\\symphony-workspaces\\GH-120"
+      )
+
+    assert prompt =~ "Handle GH-120 on vitoria in C:\\FROTA\\symphony-workspaces\\GH-120."
+    assert prompt =~ "Remote Windows commissioning contract:"
+    assert prompt =~ "worker_host=vitoria"
+    assert prompt =~ "This pilot must not require PowerShell."
+    assert prompt =~ "Do not run PowerShell commands."
+    assert prompt =~ "Do not request shell approval"
+    assert prompt =~ "normal workspace file reads/writes"
+    assert prompt =~ "return the structured result from the issue context"
+    refute prompt =~ "hostname\nwhoami\ncd\ngit status"
+
+    assert Config.settings!().codex.approval_policy == "on-request"
+    assert Config.settings!().codex.thread_sandbox == "workspace-write"
+  end
+
+  test "prompt builder does not add remote windows pilot contract outside pilot mode" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Handle {{ issue.identifier }}.",
+      worker_ssh_hosts: ["vitoria"],
+      worker_platforms: %{"vitoria" => "windows_cmd"},
+      pilot_enabled: false
+    )
+
+    issue = %Issue{
+      identifier: "GH-121",
+      title: "Normal work",
+      description: "No pilot contract",
+      state: "open",
+      url: "https://github.com/rede-industrial/frota-control-center/issues/121",
+      labels: ["capability:frontend-engineering"]
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(issue,
+        worker_host: "vitoria",
+        workspace: "C:\\FROTA\\symphony-workspaces\\GH-121"
+      )
+
+    refute prompt =~ "Remote Windows commissioning contract:"
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(
@@ -1754,7 +2146,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "~/.symphony-remote-workspaces",
-        worker_ssh_hosts: ["worker-a", "worker-b"]
+        worker_ssh_hosts: ["worker-a", "worker-b"],
+        worker_platforms: %{"worker-a" => "posix", "worker-b" => "posix"}
       )
 
       issue = %Issue{

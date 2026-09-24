@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Routing, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -240,17 +240,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    error = "agent exited: #{inspect(reason)}"
 
-    next_attempt = next_retry_attempt_from_running(running_entry)
+    if pilot_ignore_retries?() do
+      Logger.warning(
+        "Agent task blocked for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; retry disabled by pilot"
+      )
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      block_issue_from_entry(state, issue_id, running_entry, error)
+    else
+      Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+      next_attempt = next_retry_attempt_from_running(running_entry)
+
+      schedule_issue_retry(state, issue_id, next_attempt, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: error,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    end
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -405,6 +415,13 @@ defmodule SymphonyElixir.Orchestrator do
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec routed_worker_host_for_test(term(), Issue.t(), String.t() | nil) ::
+          String.t() | nil | :no_worker_capacity | {:deny, term()}
+  def routed_worker_host_for_test(%State{} = state, %Issue{} = issue, preferred_worker_host \\ nil) do
+    routed_worker_host(state, issue, preferred_worker_host)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -825,7 +842,7 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      worker_slots_available?(state, issue)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -863,6 +880,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
       issue_routable?(issue) and
+      pilot_issue_allowed?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -872,6 +890,54 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
   end
+
+  defp pilot_issue_allowed?(%Issue{} = issue) do
+    pilot = Config.settings!().pilot
+
+    if pilot.enabled do
+      pilot_issue_id_allowed?(issue, pilot.issue_ids) and
+        pilot_required_labels_allowed?(issue, pilot.required_labels) and
+        pilot_capability_allowed?(issue, pilot.capabilities)
+    else
+      true
+    end
+  end
+
+  defp pilot_issue_id_allowed?(%Issue{id: id, identifier: identifier}, issue_ids) do
+    allowed = MapSet.new(issue_ids || [])
+    MapSet.member?(allowed, id) or MapSet.member?(allowed, identifier)
+  end
+
+  defp pilot_required_labels_allowed?(%Issue{labels: labels}, required_labels) do
+    issue_labels = MapSet.new(labels || [], &normalize_label/1)
+    Enum.all?(required_labels || [], &MapSet.member?(issue_labels, normalize_label(&1)))
+  end
+
+  defp pilot_capability_allowed?(%Issue{labels: labels}, capabilities) do
+    issue_capabilities =
+      labels
+      |> List.wrap()
+      |> Enum.map(&label_capability/1)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    Enum.all?(capabilities || [], &MapSet.member?(issue_capabilities, normalize_capability(&1)))
+  end
+
+  defp label_capability("capability:" <> capability), do: normalize_capability(capability)
+  defp label_capability(_), do: nil
+
+  defp normalize_label(label) when is_binary(label), do: label |> String.trim() |> String.downcase()
+  defp normalize_label(label), do: label |> to_string() |> normalize_label()
+
+  defp normalize_capability(capability) when is_binary(capability) do
+    capability
+    |> String.trim()
+    |> String.replace("-", "_")
+    |> String.upcase()
+  end
+
+  defp normalize_capability(capability), do: capability |> to_string() |> normalize_capability()
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -940,9 +1006,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
-    case select_worker_host(state, preferred_worker_host) do
+    case routed_worker_host(state, issue, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        state
+
+      {:deny, reason} ->
+        Logger.warning("Skipping dispatch; canonical routing denied #{issue_context(issue)} reason=#{inspect(reason)}")
         state
 
       worker_host ->
@@ -1032,6 +1102,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
+       when is_binary(issue_id) and is_map(metadata) do
+    if pilot_ignore_retries?() do
+      Logger.info("Pilot mode ignoring retry for issue_id=#{issue_id}")
+      state
+    else
+      do_schedule_issue_retry(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp do_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
@@ -1157,21 +1237,35 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
+  @doc false
+  @spec startup_terminal_workspace_cleanup_enabled_for_test() :: boolean()
+  def startup_terminal_workspace_cleanup_enabled_for_test do
+    startup_terminal_workspace_cleanup_enabled?()
+  end
+
   defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-      {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{} = issue ->
-            cleanup_issue_workspace(issue)
+    if startup_terminal_workspace_cleanup_enabled?() do
+      case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
+        {:ok, issues} ->
+          issues
+          |> Enum.each(fn
+            %Issue{} = issue ->
+              cleanup_issue_workspace(issue)
 
-          _ ->
-            :ok
-        end)
+            _ ->
+              :ok
+          end)
 
-      {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+        {:error, reason} ->
+          Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+      end
+    else
+      Logger.info("Pilot mode skipping startup terminal workspace cleanup")
     end
+  end
+
+  defp startup_terminal_workspace_cleanup_enabled? do
+    not Config.settings!().pilot.enabled
   end
 
   defp notify_dashboard do
@@ -1218,6 +1312,11 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp pilot_ignore_retries? do
+    pilot = Config.settings!().pilot
+    pilot.enabled and pilot.ignore_retries
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
@@ -1322,12 +1421,33 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp worker_slots_available?(%State{} = state) do
-    select_worker_host(state, nil) != :no_worker_capacity
+  defp worker_slots_available?(%State{} = state, %Issue{} = issue) do
+    case routed_worker_host(state, issue, nil) do
+      {:deny, _reason} -> false
+      :no_worker_capacity -> false
+      _worker_host -> true
+    end
   end
 
   defp worker_slots_available?(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host) != :no_worker_capacity
+  end
+
+  defp routed_worker_host(%State{} = state, %Issue{} = issue, preferred_worker_host) do
+    case Routing.worker_for_issue(issue) do
+      {:ok, destination} ->
+        if destination in Config.settings!().worker.ssh_hosts do
+          select_worker_host(state, preferred_worker_host || destination)
+        else
+          {:deny, :worker_not_configured}
+        end
+
+      :local_allowed ->
+        select_worker_host(state, preferred_worker_host)
+
+      {:error, reason} ->
+        {:deny, reason}
+    end
   end
 
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do

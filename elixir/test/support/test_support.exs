@@ -103,11 +103,13 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          worker_workspace_roots: %{},
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
           codex_command: "codex app-server",
+          codex_executables: %{},
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
@@ -124,6 +126,12 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          pilot_enabled: false,
+          pilot_issue_ids: [],
+          pilot_required_labels: [],
+          pilot_capabilities: [],
+          pilot_worker_host: nil,
+          pilot_ignore_retries: false,
           prompt: @workflow_prompt
         ],
         overrides
@@ -140,12 +148,15 @@ defmodule SymphonyElixir.TestSupport do
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
+    worker_platforms = Keyword.get(config, :worker_platforms)
+    worker_workspace_roots = Keyword.get(config, :worker_workspace_roots)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
     codex_command = Keyword.get(config, :codex_command)
+    codex_executables = Keyword.get(config, :codex_executables)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
@@ -162,6 +173,12 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    pilot_enabled = Keyword.get(config, :pilot_enabled)
+    pilot_issue_ids = Keyword.get(config, :pilot_issue_ids)
+    pilot_required_labels = Keyword.get(config, :pilot_required_labels)
+    pilot_capabilities = Keyword.get(config, :pilot_capabilities)
+    pilot_worker_host = Keyword.get(config, :pilot_worker_host)
+    pilot_ignore_retries = Keyword.get(config, :pilot_ignore_retries)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -180,7 +197,7 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
-        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
+        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host, worker_platforms, worker_workspace_roots),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
@@ -188,6 +205,7 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
+        codex_executables_yaml(codex_executables),
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
@@ -197,6 +215,7 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        pilot_yaml(pilot_enabled, pilot_issue_ids, pilot_required_labels, pilot_capabilities, pilot_worker_host, pilot_ignore_retries),
         "---",
         prompt
       ]
@@ -205,8 +224,25 @@ defmodule SymphonyElixir.TestSupport do
     Enum.join(sections, "\n") <> "\n"
   end
 
+  defp codex_executables_yaml(values) when is_map(values) and map_size(values) > 0 do
+    [
+      "  executables:",
+      values
+      |> Enum.map(fn {host, executable} -> "    #{host}: #{yaml_value(executable)}" end)
+      |> Enum.join("\n")
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp codex_executables_yaml(_values), do: nil
+
   defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    escaped =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
+    "\"" <> escaped <> "\""
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
@@ -227,6 +263,21 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
+  defp pilot_yaml(false, [], [], [], nil, false), do: nil
+
+  defp pilot_yaml(enabled, issue_ids, required_labels, capabilities, worker_host, ignore_retries) do
+    [
+      "pilot:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  issue_ids: #{yaml_value(issue_ids)}",
+      "  required_labels: #{yaml_value(required_labels)}",
+      "  capabilities: #{yaml_value(capabilities)}",
+      "  worker_host: #{yaml_value(worker_host)}",
+      "  ignore_retries: #{yaml_value(ignore_retries)}"
+    ]
+    |> Enum.join("\n")
+  end
+
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 
   defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
@@ -242,14 +293,17 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host)
-       when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host),
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms, workspace_roots)
+       when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host) and platforms in [nil, %{}] and
+              workspace_roots in [nil, %{}],
        do: nil
 
-  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host) do
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host, platforms, workspace_roots) do
     [
       "worker:",
       ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
+      platforms not in [nil, %{}] && "  platforms: #{yaml_value(platforms)}",
+      workspace_roots not in [nil, %{}] && "  workspace_roots: #{yaml_value(workspace_roots)}",
       !is_nil(max_concurrent_agents_per_host) &&
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
     ]
