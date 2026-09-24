@@ -240,17 +240,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    error = "agent exited: #{inspect(reason)}"
 
-    next_attempt = next_retry_attempt_from_running(running_entry)
+    if pilot_ignore_retries?() do
+      Logger.warning(
+        "Agent task blocked for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; retry disabled by pilot"
+      )
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      block_issue_from_entry(state, issue_id, running_entry, error)
+    else
+      Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+      next_attempt = next_retry_attempt_from_running(running_entry)
+
+      schedule_issue_retry(state, issue_id, next_attempt, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        error: error,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    end
   end
 
   defp maybe_dispatch(%State{} = state) do

@@ -1167,7 +1167,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.startup_terminal_workspace_cleanup_enabled_for_test()
   end
 
-  test "pilot mode can ignore retries after worker exit" do
+  test "pilot mode blocks failed worker exits instead of retrying" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: ["p0-factory-loop-1x1-20260921"],
       pilot_enabled: true,
@@ -1215,6 +1215,12 @@ defmodule SymphonyElixir.CoreTest do
 
     assert state.retry_attempts == %{}
     assert MapSet.member?(state.claimed, issue_id)
+    assert state.running == %{}
+    assert %{
+             issue_id: ^issue_id,
+             identifier: "GH-101",
+             error: "agent exited: :boom"
+           } = state.blocked[issue_id]
   end
 
   test "first abnormal worker exit waits before retrying" do
