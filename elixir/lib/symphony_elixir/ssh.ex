@@ -5,7 +5,11 @@ defmodule SymphonyElixir.SSH do
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
       {remote_platform, cmd_opts} = Keyword.pop(opts, :remote_platform, :posix)
-      {:ok, System.cmd(executable, ssh_args(host, command, remote_platform), cmd_opts)}
+      {input, cmd_opts} = Keyword.pop(cmd_opts, :input)
+      {command, input} = maybe_wrap_windows_stdin_script(command, input, remote_platform)
+      args = ssh_args(host, command, remote_platform)
+
+      {:ok, run_ssh_command(executable, args, cmd_opts, input)}
     end
   end
 
@@ -56,6 +60,60 @@ defmodule SymphonyElixir.SSH do
       nil -> {:error, :ssh_not_found}
       executable -> {:ok, executable}
     end
+  end
+
+  defp run_ssh_command(executable, args, cmd_opts, nil) do
+    System.cmd(executable, args, cmd_opts)
+  end
+
+  defp run_ssh_command(executable, args, cmd_opts, input) when is_binary(input) do
+    {stderr_to_stdout?, _cmd_opts} = Keyword.pop(cmd_opts, :stderr_to_stdout, false)
+
+    port_opts =
+      [
+        :binary,
+        :exit_status,
+        args: Enum.map(args, &String.to_charlist/1)
+      ]
+      |> maybe_put_stderr_to_stdout(stderr_to_stdout?)
+
+    port = Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)
+    true = Port.command(port, input)
+    collect_port_output(port, [])
+  end
+
+  defp maybe_put_stderr_to_stdout(port_opts, true), do: [:stderr_to_stdout | port_opts]
+  defp maybe_put_stderr_to_stdout(port_opts, _value), do: port_opts
+
+  defp collect_port_output(port, acc) do
+    receive do
+      {^port, {:data, data}} ->
+        collect_port_output(port, [data | acc])
+
+      {^port, {:exit_status, status}} ->
+        {acc |> Enum.reverse() |> IO.iodata_to_binary(), status}
+    end
+  end
+
+  defp maybe_wrap_windows_stdin_script(command, input, :windows) when is_binary(input) do
+    {
+      windows_stdin_script_runner(),
+      Base.encode64(command) <> "\n" <> input
+    }
+  end
+
+  defp maybe_wrap_windows_stdin_script(command, input, _remote_platform), do: {command, input}
+
+  defp windows_stdin_script_runner do
+    [
+      "$ErrorActionPreference = 'Stop'",
+      "$script64 = [Console]::In.ReadLine()",
+      "if ([string]::IsNullOrWhiteSpace($script64)) { throw 'SCRIPT_NOT_FOUND' }",
+      "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script64))",
+      "$path = Join-Path $env:TEMP ('symphony-hook-' + [guid]::NewGuid().ToString() + '.ps1')",
+      "try { Set-Content -LiteralPath $path -Value $script -NoNewline -Encoding UTF8; & $path } finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }"
+    ]
+    |> Enum.join("; ")
   end
 
   defp ssh_args(host, command, remote_platform) do

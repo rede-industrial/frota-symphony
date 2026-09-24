@@ -332,6 +332,60 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "remote after_create hook marked for GitHub M2M receives token on ssh stdin" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-m2m-hook-#{System.unique_integer([:positive])}"
+      )
+
+    trace_file = Path.join(test_root, "ssh.trace")
+    token_client = Path.join(test_root, "token-client")
+    previous_path = System.get_env("PATH")
+    previous_token_client = System.get_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT")
+    previous_github_repo = System.get_env("GITHUB_REPO")
+
+    try do
+      File.mkdir_p!(test_root)
+      install_fake_ssh!(test_root, trace_file)
+
+      File.write!(token_client, """
+      #!/bin/sh
+      printf '%s\\n' "$*" > "#{Path.join(test_root, "token-client.args")}"
+      printf 'dummy-installation-token\\n'
+      """)
+
+      File.chmod!(token_client, 0o755)
+      System.put_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT", token_client)
+      System.put_env("GITHUB_REPO", "rede-industrial/frota-control-center")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        worker_ssh_hosts: ["gabriela"],
+        worker_platforms: %{"gabriela" => "windows"},
+        worker_workspace_roots: %{"gabriela" => "C:\\FROTA\\symphony-workspaces"},
+        hook_after_create: "$env:FROTA_GITHUB_M2M_STDIN = '1'; Write-Output 'clone'"
+      )
+
+      assert {:ok, _workspace} = Workspace.create_for_issue("GH-124", "gabriela")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "STDIN2:dummy-installation-token"
+
+      [prepare_argv, _prepare_stdin, hook_argv | _] = String.split(trace, "\n", trim: true)
+      refute prepare_argv =~ "dummy-installation-token"
+      refute hook_argv =~ "dummy-installation-token"
+      refute hook_argv =~ "Write-Output 'clone'"
+
+      assert File.read!(Path.join(test_root, "token-client.args")) ==
+               "issue --repo rede-industrial/frota-control-center\n"
+    after
+      restore_env("PATH", previous_path)
+      restore_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT", previous_token_client)
+      restore_env("GITHUB_REPO", previous_github_repo)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace surfaces after_create hook timeouts" do
     workspace_root =
       Path.join(
@@ -2168,5 +2222,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp install_fake_ssh!(test_root, trace_file) do
+    fake_ssh = Path.join(test_root, "ssh")
+    previous_path = System.get_env("PATH")
+
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    File.write!(fake_ssh, """
+    #!/bin/bash
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    if IFS= read -r -t 1 stdin; then
+      :
+    else
+      stdin=""
+    fi
+    if IFS= read -r -t 1 stdin2; then
+      :
+    else
+      stdin2=""
+    fi
+    printf 'STDIN:%s\\n' "$stdin" >> "#{trace_file}"
+    printf 'STDIN2:%s\\n' "$stdin2" >> "#{trace_file}"
+    printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' 'C:\\FROTA\\symphony-workspaces\\GH-124'
+    exit 0
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
   end
 end

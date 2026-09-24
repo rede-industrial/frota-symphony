@@ -403,7 +403,7 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, hook_script(command, workspace, worker_platform(worker_host)), timeout_ms) do
+    case run_remote_hook_command(worker_host, hook_script(command, workspace, worker_platform(worker_host)), timeout_ms, hook_name, command) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -684,9 +684,26 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_remote_command(worker_host, script, timeout_ms)
        when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+    run_remote_command(worker_host, script, timeout_ms, [])
+  end
+
+  defp run_remote_hook_command(worker_host, script, timeout_ms, hook_name, hook_command)
+       when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+    with {:ok, ssh_opts} <- remote_hook_ssh_opts(hook_name, hook_command) do
+      run_remote_command(worker_host, script, timeout_ms, ssh_opts)
+    end
+  end
+
+  defp run_remote_command(worker_host, script, timeout_ms, ssh_opts)
+       when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 and
+              is_list(ssh_opts) do
     task =
       Task.async(fn ->
-        SSH.run(worker_host, script, stderr_to_stdout: true, remote_platform: worker_platform(worker_host))
+        opts =
+          [stderr_to_stdout: true, remote_platform: worker_platform(worker_host)]
+          |> Keyword.merge(ssh_opts)
+
+        SSH.run(worker_host, script, opts)
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -696,6 +713,50 @@ defmodule SymphonyElixir.Workspace do
       nil ->
         Task.shutdown(task, :brutal_kill)
         {:error, {:workspace_hook_timeout, "remote_command", timeout_ms}}
+    end
+  end
+
+  defp remote_hook_ssh_opts("after_create", command) when is_binary(command) do
+    if String.contains?(command, "FROTA_GITHUB_M2M_STDIN") do
+      case issue_github_m2m_token() do
+        {:ok, token} -> {:ok, [input: token <> "\n"]}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  defp remote_hook_ssh_opts(_hook_name, _command), do: {:ok, []}
+
+  defp issue_github_m2m_token do
+    repo = github_tracker_repo()
+    executable = System.get_env("SYMPHONY_GITHUB_M2M_TOKEN_CLIENT") || "/usr/local/bin/frota-github-m2m-token-client"
+
+    case System.cmd(executable, ["issue", "--repo", repo], stderr_to_stdout: true) do
+      {output, 0} ->
+        token = String.trim(output)
+
+        if token == "" do
+          {:error, {:github_m2m_token_issue_failed, :empty_token}}
+        else
+          {:ok, token}
+        end
+
+      {output, status} ->
+        {:error, {:github_m2m_token_issue_failed, status, sanitize_hook_output_for_log(output)}}
+    end
+  rescue
+    error in ErlangError ->
+      {:error, {:github_m2m_token_issue_failed, Exception.message(error)}}
+  end
+
+  defp github_tracker_repo do
+    Config.settings!().tracker.provider
+    |> Map.get("repo")
+    |> case do
+      repo when is_binary(repo) and repo != "" -> repo
+      _ -> System.get_env("GITHUB_REPO") || "rede-industrial/frota-control-center"
     end
   end
 

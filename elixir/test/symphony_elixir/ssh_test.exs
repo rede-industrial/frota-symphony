@@ -67,6 +67,34 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "echo ready"
   end
 
+  test "run/3 sends input to ssh stdin without appending it to arguments" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-stdin-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    IFS= read -r stdin
+    printf 'STDIN:%s\\n' "$stdin" >> "#{trace_file}"
+    exit 0
+    """)
+
+    assert {:ok, {"", 0}} =
+             SSH.run("localhost", "printf ok", input: "dummy-token\n", stderr_to_stdout: true)
+
+    trace = File.read!(trace_file)
+    assert trace =~ "STDIN:dummy-token"
+
+    [argv_line | _] = String.split(trace, "\n", trim: true)
+    refute argv_line =~ "dummy-token"
+  end
+
   test "run/3 keeps the user prefix when parsing user@host:port targets" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-user-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
