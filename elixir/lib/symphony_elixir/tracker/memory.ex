@@ -30,6 +30,39 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
+  @spec persist_completion(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def persist_completion(%Issue{} = issue, completion) when is_map(completion) do
+    if Application.get_env(:symphony_elixir, :memory_tracker_completion_fail, false) do
+      {:error, :memory_completion_failed}
+    else
+      completion_record = %{
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        completion: completion,
+        persisted_at: DateTime.utc_now()
+      }
+
+      completions = Application.get_env(:symphony_elixir, :memory_tracker_completions, [])
+      marker = {issue.id, completion[:session_id]}
+
+      updated =
+        if Enum.any?(completions, fn entry -> {entry.issue_id, entry.completion[:session_id]} == marker end) do
+          completions
+        else
+          [completion_record | completions]
+        end
+
+      Application.put_env(:symphony_elixir, :memory_tracker_completions, updated)
+
+      {:ok,
+       %{
+         tracker: "memory",
+         issue_id: issue.id,
+         terminal_transition: completion[:terminal_transition] || "none"
+       }}
+    end
+  end
+
   @spec secret_environment_names(map()) :: [String.t()]
   def secret_environment_names(_tracker_settings), do: []
 

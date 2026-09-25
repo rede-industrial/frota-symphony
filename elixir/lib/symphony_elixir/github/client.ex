@@ -11,6 +11,7 @@ defmodule SymphonyElixir.GitHub.Client do
   @api_version "2022-11-28"
   @page_size 100
   @user_agent "symphony"
+  @completion_marker_prefix "<!-- symphony:completion:"
 
   @spec validate_settings(map()) :: :ok | {:error, term()}
   def validate_settings(tracker_settings) do
@@ -38,6 +39,11 @@ defmodule SymphonyElixir.GitHub.Client do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
     fetch_issues_by_ids(issue_ids, Config.settings!().tracker, &perform_request/5)
+  end
+
+  @spec persist_completion(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def persist_completion(%Issue{} = issue, completion) when is_map(completion) do
+    persist_completion(issue, completion, Config.settings!().tracker, &perform_request/5)
   end
 
   @spec request(String.t(), String.t(), map(), term(), keyword()) ::
@@ -72,6 +78,14 @@ defmodule SymphonyElixir.GitHub.Client do
   def fetch_issues_by_ids_for_test(issue_ids, tracker_settings, request_fun)
       when is_list(issue_ids) and is_map(tracker_settings) and is_function(request_fun, 5) do
     fetch_issues_by_ids(issue_ids, tracker_settings, request_fun)
+  end
+
+  @doc false
+  @spec persist_completion_for_test(Issue.t(), map(), map(), function()) ::
+          {:ok, map()} | {:error, term()}
+  def persist_completion_for_test(%Issue{} = issue, completion, tracker_settings, request_fun)
+      when is_map(completion) and is_map(tracker_settings) and is_function(request_fun, 5) do
+    persist_completion(issue, completion, tracker_settings, request_fun)
   end
 
   defp fetch_issues_by_states(state_names, tracker_settings, request_fun) do
@@ -132,6 +146,130 @@ defmodule SymphonyElixir.GitHub.Client do
       end
     end
   end
+
+  defp persist_completion(%Issue{} = issue, completion, tracker_settings, request_fun) do
+    with {:ok, github_settings} <- settings(tracker_settings),
+         {:ok, issue_number} <- parse_issue_number(issue.id || issue.identifier),
+         :ok <- ensure_completion_comment(issue_number, issue, completion, github_settings, request_fun),
+         {:ok, transition} <-
+           maybe_close_completed_issue(issue_number, completion, github_settings, request_fun) do
+      {:ok,
+       %{
+         tracker: "github",
+         issue_number: issue_number,
+         comment_marker: completion_marker(issue, completion),
+         terminal_transition: transition
+       }}
+    end
+  end
+
+  defp ensure_completion_comment(issue_number, issue, completion, settings, request_fun) do
+    marker = completion_marker(issue, completion)
+
+    with {:ok, comments} <- fetch_issue_comments(issue_number, settings, request_fun) do
+      if completion_comment_exists?(comments, marker) do
+        :ok
+      else
+        create_completion_comment(
+          issue_number,
+          completion_comment_body(marker, issue, completion),
+          settings,
+          request_fun
+        )
+      end
+    end
+  end
+
+  defp fetch_issue_comments(issue_number, settings, request_fun) do
+    request_with_settings(
+      "GET",
+      repository_issue_comments_path(settings, issue_number),
+      %{"per_page" => @page_size},
+      nil,
+      settings,
+      request_fun,
+      false
+    )
+  end
+
+  defp create_completion_comment(issue_number, body, settings, request_fun) do
+    case request_with_settings(
+           "POST",
+           repository_issue_comments_path(settings, issue_number),
+           %{},
+           %{"body" => body},
+           settings,
+           request_fun,
+           false
+         ) do
+      {:ok, %{} = _payload} -> :ok
+      {:ok, _payload} -> {:error, :github_unknown_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_close_completed_issue(issue_number, completion, settings, request_fun) do
+    if completion[:terminal_transition] == "closed" do
+      case request_with_settings(
+             "PATCH",
+             repository_issue_path(settings, issue_number),
+             %{},
+             %{"state" => "closed"},
+             settings,
+             request_fun,
+             false
+           ) do
+        {:ok, %{} = _payload} -> {:ok, "closed"}
+        {:ok, _payload} -> {:error, :github_unknown_payload}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, "none"}
+    end
+  end
+
+  defp completion_comment_exists?(comments, marker) when is_list(comments) do
+    Enum.any?(comments, fn
+      %{"body" => body} when is_binary(body) -> String.contains?(body, marker)
+      _ -> false
+    end)
+  end
+
+  defp completion_comment_exists?(_comments, _marker), do: false
+
+  defp completion_marker(%Issue{id: issue_id}, completion) do
+    session_id = completion[:session_id] || "n/a"
+    "#{@completion_marker_prefix}#{issue_id}:#{session_id} -->"
+  end
+
+  defp completion_comment_body(marker, issue, completion) do
+    evidence =
+      completion
+      |> Map.get(:evidence, %{})
+      |> Enum.map(fn {key, value} -> "- #{key}: #{format_completion_value(value)}" end)
+      |> Enum.join("\n")
+
+    """
+    #{marker}
+    ## Symphony completion
+
+    - issue: #{issue.identifier || issue.id}
+    - result: #{completion[:result]}
+    - delivery_status: #{completion[:delivery_status]}
+    - session_id: #{completion[:session_id] || "n/a"}
+    - turn_count: #{completion[:turn_count] || 0}
+    - worker_host: #{completion[:worker_host] || "n/a"}
+    - capability: #{completion[:capability] || "UNKNOWN"}
+    - terminal_transition: #{completion[:terminal_transition] || "none"}
+
+    ### Evidence
+    #{evidence}
+    """
+  end
+
+  defp format_completion_value(nil), do: "n/a"
+  defp format_completion_value(value) when is_binary(value), do: value
+  defp format_completion_value(value), do: inspect(value)
 
   defp fetch_issue_ids([], _settings, _request_fun, acc), do: {:ok, Enum.reverse(acc)}
 
@@ -345,6 +483,9 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp repository_issue_path(settings, issue_number),
     do: "#{repository_issues_path(settings)}/#{issue_number}"
+
+  defp repository_issue_comments_path(settings, issue_number),
+    do: "#{repository_issue_path(settings, issue_number)}/comments"
 
   defp encoded_repo(repo) do
     repo

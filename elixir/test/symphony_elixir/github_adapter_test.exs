@@ -371,6 +371,96 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert non_json_body["output"] =~ "#PID"
   end
 
+  test "client persists completion with an idempotency marker before closing issue" do
+    issue = %Issue{id: "127", identifier: "GH-127", labels: ["capability:system-analysis"]}
+
+    completion = %{
+      result: "SUCCESS",
+      delivery_status: "SUCCESS",
+      session_id: "session-127",
+      turn_count: 4,
+      worker_host: "norma",
+      capability: "SYSTEM_ANALYSIS",
+      terminal_transition: "closed",
+      evidence: %{last_message: "analysis delivered"}
+    }
+
+    request_fun = fn
+      "GET", "/repos/octo/repo/issues/127/comments", %{"per_page" => 100}, nil, _settings ->
+        send(self(), :completion_comments_read)
+        {:ok, %{status: 200, body: []}}
+
+      "POST", "/repos/octo/repo/issues/127/comments", %{}, %{"body" => body}, _settings ->
+        send(self(), {:completion_comment_created, body})
+        {:ok, %{status: 201, body: %{"id" => 99}}}
+
+      "PATCH", "/repos/octo/repo/issues/127", %{}, %{"state" => "closed"}, _settings ->
+        send(self(), :completion_issue_closed)
+        {:ok, %{status: 200, body: raw_issue(127)}}
+    end
+
+    assert {:ok, receipt} =
+             GitHubClient.persist_completion_for_test(issue, completion, tracker_settings(), request_fun)
+
+    assert receipt.tracker == "github"
+    assert receipt.issue_number == 127
+    assert receipt.terminal_transition == "closed"
+    assert receipt.comment_marker == "<!-- symphony:completion:127:session-127 -->"
+
+    assert_received :completion_comments_read
+    assert_received {:completion_comment_created, body}
+    assert body =~ "<!-- symphony:completion:127:session-127 -->"
+    assert body =~ "- worker_host: norma"
+    assert body =~ "- capability: SYSTEM_ANALYSIS"
+    assert_received :completion_issue_closed
+  end
+
+  test "client does not duplicate completion comments and fails closed on comment errors" do
+    issue = %Issue{id: "128", identifier: "GH-128"}
+
+    completion = %{
+      result: "SUCCESS",
+      delivery_status: "SUCCESS",
+      session_id: "session-128",
+      terminal_transition: "closed",
+      evidence: %{last_message: "done"}
+    }
+
+    existing_marker = "<!-- symphony:completion:128:session-128 -->"
+
+    idempotent_request_fun = fn
+      "GET", "/repos/octo/repo/issues/128/comments", %{"per_page" => 100}, nil, _settings ->
+        {:ok, %{status: 200, body: [%{"body" => "#{existing_marker}\nexisting"}]}}
+
+      "PATCH", "/repos/octo/repo/issues/128", %{}, %{"state" => "closed"}, _settings ->
+        send(self(), :idempotent_close_requested)
+        {:ok, %{status: 200, body: Map.put(raw_issue(128), "state", "closed")}}
+
+      "POST", _path, _params, _body, _settings ->
+        flunk("existing completion marker should prevent duplicate comments")
+    end
+
+    assert {:ok, receipt} =
+             GitHubClient.persist_completion_for_test(issue, completion, tracker_settings(), idempotent_request_fun)
+
+    assert receipt.comment_marker == existing_marker
+    assert_received :idempotent_close_requested
+
+    failing_request_fun = fn
+      "GET", "/repos/octo/repo/issues/128/comments", %{"per_page" => 100}, nil, _settings ->
+        {:ok, %{status: 200, body: []}}
+
+      "POST", "/repos/octo/repo/issues/128/comments", %{}, %{"body" => _body}, _settings ->
+        {:ok, %{status: 500, body: %{"message" => "server error"}}}
+
+      "PATCH", _path, _params, _body, _settings ->
+        flunk("issue must not close when completion comment persistence fails")
+    end
+
+    assert {:error, {:github_api_status, 500}} =
+             GitHubClient.persist_completion_for_test(issue, completion, tracker_settings(), failing_request_fun)
+  end
+
   test "tracker binds GitHub tools and token env names from provider config" do
     token_env = "SYMPHONY_GITHUB_TOKEN_#{System.unique_integer([:positive])}"
     previous_token = System.get_env(token_env)

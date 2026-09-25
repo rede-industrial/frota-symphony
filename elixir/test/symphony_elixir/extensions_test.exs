@@ -262,7 +262,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1, "completed" => 0},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -308,6 +308,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
              ],
+             "completed" => [],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -343,6 +344,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "retry" => nil,
              "blocked" => nil,
+             "completed" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -610,7 +612,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1, "completed" => 0}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
