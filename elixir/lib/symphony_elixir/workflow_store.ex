@@ -95,13 +95,27 @@ defmodule SymphonyElixir.WorkflowStore do
       end
     else
       {:preflight_failed, reason} ->
-        {:error, {:preflight_failed, reason}, audit_event([], :workflow_preflight_failed, %{candidate_path: candidate_path, reason: reason})}
+        {:error, {:preflight_failed, reason},
+         audit_event([], :workflow_preflight_failed, %{
+           candidate_path: candidate_path,
+           reason: reason
+         })}
 
       {:promotion_failed, reason, audit} ->
-        {:error, {:promotion_failed, reason}, audit_event(audit, :workflow_promotion_failed, %{live_path: live_path, reason: reason})}
+        {:error, {:promotion_failed, reason},
+         audit_event(audit, :workflow_promotion_failed, %{
+           live_path: live_path,
+           reason: reason
+         })}
 
       {:error, reason} ->
-        {:error, {:promotion_failed, reason}, audit_event([], :workflow_promotion_failed, %{live_path: live_path, reason: reason})}
+        audit =
+          audit_event([], :workflow_promotion_failed, %{
+            live_path: live_path,
+            reason: reason
+          })
+
+        {:error, {:promotion_failed, reason}, audit}
     end
   end
 
@@ -269,7 +283,9 @@ defmodule SymphonyElixir.WorkflowStore do
 
         case health_check.(live_path) do
           :ok ->
-            {:error, {:rolled_back, health_reason}, audit_event(audit, :rollback_health_check_passed, %{path: live_path})}
+            audit = audit_event(audit, :rollback_health_check_passed, %{path: live_path})
+
+            {:error, {:rolled_back, health_reason}, audit}
 
           rollback_reason ->
             {:error, {:rollback_failed, health_reason, rollback_reason},

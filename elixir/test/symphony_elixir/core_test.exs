@@ -2029,12 +2029,7 @@ defmodule SymphonyElixir.CoreTest do
       {:ok, contents} ->
         contents
         |> String.split()
-        |> Enum.flat_map(fn value ->
-          case Integer.parse(value) do
-            {pid, ""} -> [pid]
-            _ -> []
-          end
-        end)
+        |> Enum.flat_map(&parse_pid/1)
         |> Enum.uniq()
 
       {:error, _reason} ->
@@ -2052,16 +2047,18 @@ defmodule SymphonyElixir.CoreTest do
       {output, 0} ->
         output
         |> String.split()
-        |> Enum.flat_map(fn value ->
-          case Integer.parse(value) do
-            {pid, ""} -> [pid]
-            _ -> []
-          end
-        end)
+        |> Enum.flat_map(&parse_pid/1)
         |> Enum.each(&terminate_recorded_pid/1)
 
       {_output, _status} ->
         :ok
+    end
+  end
+
+  defp parse_pid(value) do
+    case Integer.parse(value) do
+      {pid, ""} -> [pid]
+      _ -> []
     end
   end
 

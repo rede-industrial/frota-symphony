@@ -217,8 +217,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     remote_platform = worker_platform(worker_host)
 
     with :ok <- verify_remote_codex_executable(worker_host, remote_platform),
-         {:ok, remote_command} <- remote_launch_command(workspace, worker_host, dynamic_tool_binding, remote_platform) do
-      SSH.start_port(worker_host, remote_command, line: @port_line_bytes, remote_platform: app_server_remote_platform(remote_platform))
+         {:ok, remote_command} <-
+           remote_launch_command(workspace, worker_host, dynamic_tool_binding, remote_platform) do
+      SSH.start_port(
+        worker_host,
+        remote_command,
+        line: @port_line_bytes,
+        remote_platform: app_server_remote_platform(remote_platform)
+      )
     end
   end
 

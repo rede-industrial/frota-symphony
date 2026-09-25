@@ -403,7 +403,9 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_hook_command(worker_host, hook_script(command, workspace, worker_platform(worker_host)), timeout_ms, hook_name, command) do
+    hook_command = hook_script(command, workspace, worker_platform(worker_host))
+
+    case run_remote_hook_command(worker_host, hook_command, timeout_ms, hook_name, command) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -660,19 +662,7 @@ defmodule SymphonyElixir.Workspace do
     lines = String.split(IO.iodata_to_binary(output), "\n", trim: true)
 
     payload =
-      Enum.find_value(lines, fn line ->
-        case String.split(line, "\t", parts: 3) do
-          [@remote_workspace_marker, created, path] when created in ["0", "1"] ->
-            normalized_path = trim_remote_line_ending(path)
-
-            if normalized_path != "" do
-              {created == "1", normalized_path}
-            end
-
-          _ ->
-            nil
-        end
-      end)
+      Enum.find_value(lines, &parse_remote_workspace_line/1)
 
     case payload do
       {created?, workspace} when is_boolean(created?) and is_binary(workspace) ->
@@ -680,6 +670,24 @@ defmodule SymphonyElixir.Workspace do
 
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
+    end
+  end
+
+  defp parse_remote_workspace_line(line) do
+    case String.split(line, "\t", parts: 3) do
+      [@remote_workspace_marker, created, path] when created in ["0", "1"] ->
+        remote_workspace_payload(created, path)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp remote_workspace_payload(created, path) do
+    normalized_path = trim_remote_line_ending(path)
+
+    if normalized_path != "" do
+      {created == "1", normalized_path}
     end
   end
 

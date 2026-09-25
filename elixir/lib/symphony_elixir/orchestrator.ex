@@ -1365,23 +1365,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp run_terminal_workspace_cleanup do
     if startup_terminal_workspace_cleanup_enabled?() do
-      case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-        {:ok, issues} ->
-          issues
-          |> Enum.each(fn
-            %Issue{} = issue ->
-              cleanup_issue_workspace(issue)
-
-            _ ->
-              :ok
-          end)
-
-        {:error, reason} ->
-          Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
-      end
+      Config.settings!().tracker.terminal_states
+      |> Tracker.fetch_issues_by_states()
+      |> handle_terminal_workspace_cleanup()
     else
       Logger.info("Pilot mode skipping startup terminal workspace cleanup")
     end
+  end
+
+  defp handle_terminal_workspace_cleanup({:ok, issues}) do
+    Enum.each(issues, fn
+      %Issue{} = issue -> cleanup_issue_workspace(issue)
+      _ -> :ok
+    end)
+  end
+
+  defp handle_terminal_workspace_cleanup({:error, reason}) do
+    Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
   end
 
   defp startup_terminal_workspace_cleanup_enabled? do

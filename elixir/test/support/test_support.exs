@@ -272,8 +272,7 @@ defmodule SymphonyElixir.TestSupport do
     [
       "  executables:",
       values
-      |> Enum.map(fn {host, executable} -> "    #{host}: #{yaml_value(executable)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {host, executable} -> "    #{host}: #{yaml_value(executable)}" end)
     ]
     |> Enum.join("\n")
   end

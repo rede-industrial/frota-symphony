@@ -349,7 +349,11 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :issue_ids, :required_labels, :capabilities, :worker_host, :ignore_retries], empty_values: [])
+      |> cast(
+        attrs,
+        [:enabled, :issue_ids, :required_labels, :capabilities, :worker_host, :ignore_retries],
+        empty_values: []
+      )
       |> update_change(:issue_ids, &normalize_tokens/1)
       |> update_change(:required_labels, &normalize_labels/1)
       |> update_change(:capabilities, &normalize_capabilities/1)
@@ -363,13 +367,17 @@ defmodule SymphonyElixir.Config.Schema do
         |> validate_length(:issue_ids, is: 1)
         |> validate_length(:capabilities, is: 1)
         |> validate_required([:worker_host])
-        |> validate_change(:worker_host, fn :worker_host, value ->
-          if is_binary(value) and String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
-        end)
+        |> validate_change(:worker_host, &validate_worker_host/2)
       else
         changeset
       end
     end
+
+    defp validate_worker_host(:worker_host, value) when is_binary(value) do
+      if String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
+    end
+
+    defp validate_worker_host(:worker_host, _value), do: [worker_host: "can't be blank"]
 
     defp normalize_tokens(values) when is_list(values) do
       values
