@@ -40,7 +40,9 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      finops_circuit: nil,
+      audit_events: []
     ]
   end
 
@@ -215,6 +217,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
+        issue: running_entry.issue,
         issue_url: running_entry.issue.url,
         delay_type: :continuation,
         worker_host: Map.get(running_entry, :worker_host),
@@ -243,9 +246,7 @@ defmodule SymphonyElixir.Orchestrator do
     error = "agent exited: #{inspect(reason)}"
 
     if pilot_ignore_retries?() do
-      Logger.warning(
-        "Agent task blocked for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; retry disabled by pilot"
-      )
+      Logger.warning("Agent task blocked for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; retry disabled by pilot")
 
       block_issue_from_entry(state, issue_id, running_entry, error)
     else
@@ -255,6 +256,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       schedule_issue_retry(state, issue_id, next_attempt, %{
         identifier: running_entry.identifier,
+        issue: running_entry.issue,
         issue_url: running_entry.issue.url,
         error: error,
         worker_host: Map.get(running_entry, :worker_host),
@@ -395,6 +397,32 @@ defmodule SymphonyElixir.Orchestrator do
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec mission_issue_allowed_for_test(Issue.t()) :: boolean()
+  def mission_issue_allowed_for_test(%Issue{} = issue) do
+    mission_issue_allowed?(issue)
+  end
+
+  @doc false
+  @spec schedule_issue_retry_for_test(term(), String.t(), non_neg_integer(), map()) :: term()
+  def schedule_issue_retry_for_test(%State{} = state, issue_id, attempt, metadata)
+      when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) do
+    schedule_issue_retry(state, issue_id, attempt, metadata)
+  end
+
+  @doc false
+  @spec dispatch_issue_for_test(term(), Issue.t(), non_neg_integer() | nil, String.t() | nil) :: term()
+  def dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ 1, preferred_worker_host \\ nil) do
+    do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+  end
+
+  @doc false
+  @spec finops_circuit_open_for_test(term(), Issue.t() | nil, non_neg_integer() | nil) ::
+          :closed | {:open, String.t()}
+  def finops_circuit_open_for_test(%State{} = state, issue, attempt \\ nil) do
+    finops_circuit_open?(state, issue, attempt)
   end
 
   @doc false
@@ -646,6 +674,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> terminate_running_issue(issue_id, false)
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: identifier,
+          issue: Map.get(running_entry, :issue),
           issue_url: running_entry.issue.url,
           error: "stalled for #{elapsed_ms}ms without codex activity"
         })
@@ -881,6 +910,7 @@ defmodule SymphonyElixir.Orchestrator do
     Enum.all?([id, identifier, title, state_name], &present_string?/1) and
       issue_routable?(issue) and
       pilot_issue_allowed?(issue) and
+      mission_issue_allowed?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -901,6 +931,21 @@ defmodule SymphonyElixir.Orchestrator do
     else
       true
     end
+  end
+
+  defp mission_issue_allowed?(%Issue{} = issue) do
+    mission = Config.settings!().mission
+
+    if mission.enabled do
+      mission_issue_id_allowed?(issue, mission.issue_ids)
+    else
+      true
+    end
+  end
+
+  defp mission_issue_id_allowed?(%Issue{id: id, identifier: identifier}, issue_ids) do
+    allowed = MapSet.new(issue_ids || [])
+    MapSet.member?(allowed, id) or MapSet.member?(allowed, identifier)
   end
 
   defp pilot_issue_id_allowed?(%Issue{id: id, identifier: identifier}, issue_ids) do
@@ -1006,6 +1051,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
+    case autonomy_circuit_open?(state, issue, attempt) do
+      {:open, reason} ->
+        Logger.warning("Autonomy circuit open; blocking dispatch for #{issue_context(issue)} reason=#{reason}")
+        block_issue_from_issue(state, issue, reason, %{attempt: attempt, guard: guard_from_reason(reason)})
+
+      :closed ->
+        dispatch_issue_after_finops(state, issue, attempt, preferred_worker_host, recipient)
+    end
+  end
+
+  defp dispatch_issue_after_finops(%State{} = state, issue, attempt, preferred_worker_host, recipient) do
     case routed_worker_host(state, issue, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
@@ -1066,6 +1122,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
+          issue: issue,
           issue_url: issue.url,
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
@@ -1107,20 +1164,50 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Pilot mode ignoring retry for issue_id=#{issue_id}")
       state
     else
-      do_schedule_issue_retry(state, issue_id, attempt, metadata)
+      guarded_schedule_issue_retry(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp guarded_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata) do
+    previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
+    next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
+
+    cond do
+      kill_switch_enabled?() ->
+        reason = kill_switch_reason()
+        Logger.warning("Kill switch open; blocking retry for issue_id=#{issue_id} attempt=#{next_attempt} reason=#{reason}")
+        block_issue_from_retry_metadata(state, issue_id, Map.merge(metadata, %{attempt: next_attempt, guard: :kill_switch}), reason)
+
+      retry_guard_blocks_attempt?(next_attempt) ->
+        reason = "retry_guard max_attempts_per_issue exceeded at attempt #{next_attempt}"
+
+        Logger.warning("Retry guard blocked issue_id=#{issue_id} attempt=#{next_attempt}; #{reason}")
+
+        block_issue_from_retry_metadata(state, issue_id, Map.put(metadata, :attempt, next_attempt), reason)
+
+      finops_retry_blocks_attempt?(state, Map.get(metadata, :issue), next_attempt) ->
+        {:open, reason} = finops_circuit_open?(state, Map.get(metadata, :issue), next_attempt)
+
+        Logger.warning("FinOps circuit open; blocking retry for issue_id=#{issue_id} attempt=#{next_attempt} reason=#{reason}")
+
+        block_issue_from_retry_metadata(state, issue_id, Map.put(metadata, :attempt, next_attempt), reason)
+
+      true ->
+        do_schedule_issue_retry(state, issue_id, next_attempt, metadata)
     end
   end
 
   defp do_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
-    next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
+    next_attempt = attempt
     delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     issue_url = pick_retry_issue_url(previous_retry, metadata)
+    issue = metadata[:issue] || Map.get(previous_retry, :issue)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
@@ -1144,12 +1231,44 @@ defmodule SymphonyElixir.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
+            issue: issue,
             issue_url: issue_url,
             error: error,
             worker_host: worker_host,
             workspace_path: workspace_path
           })
     }
+    |> record_audit_event(:issue_retry_scheduled, %{
+      issue_id: issue_id,
+      identifier: identifier,
+      attempt: next_attempt,
+      error: error,
+      due_at_ms: due_at_ms
+    })
+  end
+
+  defp schedule_issue_slot_wait(%State{} = state, %Issue{} = issue, attempt, metadata) do
+    previous_retry = Map.get(state.retry_attempts, issue.id, %{attempt: attempt})
+    preserved_attempt = previous_retry[:attempt] || attempt || 0
+
+    do_schedule_issue_retry(
+      state,
+      issue.id,
+      preserved_attempt,
+      Map.merge(metadata, %{
+        issue: issue,
+        identifier: issue.identifier,
+        issue_url: issue.url,
+        error: "waiting for orchestrator slot",
+        guard: :slot_wait
+      })
+    )
+    |> record_audit_event(:issue_waiting_for_slot, %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      attempt: preserved_attempt,
+      reason: "no available orchestrator slots"
+    })
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -1158,6 +1277,7 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           issue_url: Map.get(retry_entry, :issue_url),
+          issue: Map.get(retry_entry, :issue),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path)
@@ -1245,23 +1365,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp run_terminal_workspace_cleanup do
     if startup_terminal_workspace_cleanup_enabled?() do
-      case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-        {:ok, issues} ->
-          issues
-          |> Enum.each(fn
-            %Issue{} = issue ->
-              cleanup_issue_workspace(issue)
-
-            _ ->
-              :ok
-          end)
-
-        {:error, reason} ->
-          Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
-      end
+      Config.settings!().tracker.terminal_states
+      |> Tracker.fetch_issues_by_states()
+      |> handle_terminal_workspace_cleanup()
     else
       Logger.info("Pilot mode skipping startup terminal workspace cleanup")
     end
+  end
+
+  defp handle_terminal_workspace_cleanup({:ok, issues}) do
+    Enum.each(issues, fn
+      %Issue{} = issue -> cleanup_issue_workspace(issue)
+      _ -> :ok
+    end)
+  end
+
+  defp handle_terminal_workspace_cleanup({:error, reason}) do
+    Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
   end
 
   defp startup_terminal_workspace_cleanup_enabled? do
@@ -1293,30 +1413,193 @@ defmodule SymphonyElixir.Orchestrator do
              issue.id,
              attempt + 1,
              Map.merge(metadata, %{
+               issue: issue,
                identifier: issue.identifier,
                error: "retry dispatch refresh failed: #{inspect(reason)}"
              })
            )}
       end
     else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+      Logger.debug("No available slots for retrying #{issue_context(issue)}; keeping issue pending without consuming retry attempt")
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      {:noreply, schedule_issue_slot_wait(state, issue, attempt, metadata)}
     end
   end
 
   defp pilot_ignore_retries? do
     pilot = Config.settings!().pilot
     pilot.enabled and pilot.ignore_retries
+  end
+
+  defp retry_guard_blocks_attempt?(attempt) when is_integer(attempt) and attempt > 0 do
+    guard = Config.settings!().retry_guard
+    guard.enabled and attempt > guard.max_attempts_per_issue
+  end
+
+  defp retry_guard_blocks_attempt?(_attempt), do: false
+
+  defp finops_retry_blocks_attempt?(%State{} = state, issue, attempt) do
+    match?({:open, _reason}, finops_circuit_open?(state, issue, attempt))
+  end
+
+  defp autonomy_circuit_open?(%State{} = state, issue, attempt) do
+    if kill_switch_enabled?() do
+      {:open, kill_switch_reason()}
+    else
+      finops_circuit_open?(state, issue, attempt)
+    end
+  end
+
+  defp finops_circuit_open?(%State{} = state, issue, attempt) do
+    guard = Config.settings!().finops_guard
+
+    cond do
+      !guard.enabled ->
+        :closed
+
+      !finops_guard_has_explicit_limit?(guard) ->
+        {:open, "finops_guard explicit limit not configured"}
+
+      limit_exceeded?(state.codex_totals.total_tokens, guard.max_observed_tokens) ->
+        {:open, "max_observed_tokens exceeded"}
+
+      limit_exceeded?(state.codex_totals.total_tokens, guard.max_tokens_per_mission) ->
+        {:open, "max_tokens_per_mission exceeded"}
+
+      retry_limit_exceeded?(attempt, guard.max_retries_per_issue) ->
+        {:open, "max_retries_per_issue exceeded"}
+
+      issue_token_limit_exceeded?(state, issue, guard.max_tokens_per_issue) ->
+        {:open, "max_tokens_per_issue exceeded"}
+
+      issue_turn_limit_exceeded?(state, issue, guard.max_turns_per_issue) ->
+        {:open, "max_turns_per_issue exceeded"}
+
+      true ->
+        :closed
+    end
+  end
+
+  defp finops_circuit_open?(_state, _issue, _attempt), do: :closed
+
+  defp finops_guard_has_explicit_limit?(guard) do
+    [
+      guard.max_observed_tokens,
+      guard.max_tokens_per_mission,
+      guard.max_tokens_per_issue,
+      guard.max_turns_per_issue,
+      guard.max_retries_per_issue
+    ]
+    |> Enum.any?(&is_integer/1)
+  end
+
+  defp kill_switch_enabled? do
+    Config.settings!().kill_switch.enabled
+  end
+
+  defp kill_switch_reason do
+    reason = Config.settings!().kill_switch.reason
+
+    if is_binary(reason) and String.trim(reason) != "" do
+      "kill_switch enabled: #{String.trim(reason)}"
+    else
+      "kill_switch enabled"
+    end
+  end
+
+  defp guard_from_reason("kill_switch" <> _), do: :kill_switch
+  defp guard_from_reason("finops_guard" <> _), do: :finops
+  defp guard_from_reason("max_" <> _), do: :finops
+  defp guard_from_reason(_reason), do: nil
+
+  defp limit_exceeded?(_value, nil), do: false
+  defp limit_exceeded?(value, limit) when is_integer(value) and is_integer(limit), do: value >= limit
+  defp limit_exceeded?(_value, _limit), do: false
+
+  defp retry_limit_exceeded?(attempt, limit) when is_integer(attempt) and is_integer(limit),
+    do: attempt > limit
+
+  defp retry_limit_exceeded?(_attempt, _limit), do: false
+
+  defp issue_token_limit_exceeded?(%State{} = state, %Issue{id: issue_id}, limit)
+       when is_binary(issue_id) do
+    case Map.get(state.running, issue_id) do
+      %{codex_total_tokens: total} -> limit_exceeded?(total, limit)
+      _ -> false
+    end
+  end
+
+  defp issue_token_limit_exceeded?(_state, _issue, _limit), do: false
+
+  defp issue_turn_limit_exceeded?(%State{} = state, %Issue{id: issue_id}, limit)
+       when is_binary(issue_id) do
+    case Map.get(state.running, issue_id) do
+      %{turn_count: turn_count} -> limit_exceeded?(turn_count, limit)
+      _ -> false
+    end
+  end
+
+  defp issue_turn_limit_exceeded?(_state, _issue, _limit), do: false
+
+  defp block_issue_from_issue(%State{} = state, %Issue{} = issue, error, metadata) do
+    block_issue_from_retry_metadata(
+      state,
+      issue.id,
+      metadata
+      |> Map.put(:identifier, issue.identifier)
+      |> Map.put(:issue, issue)
+      |> Map.put(:issue_url, issue.url),
+      error
+    )
+  end
+
+  defp block_issue_from_retry_metadata(%State{} = state, issue_id, metadata, error) do
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: metadata[:identifier] || issue_id,
+      issue: metadata[:issue],
+      worker_host: metadata[:worker_host],
+      workspace_path: metadata[:workspace_path],
+      session_id: metadata[:session_id] || "n/a",
+      error: error,
+      evidence: Map.take(metadata, [:attempt, :error, :guard, :issue_url, :worker_host, :workspace_path]),
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: metadata[:last_codex_message],
+      last_codex_event: metadata[:last_codex_event],
+      last_codex_timestamp: metadata[:last_codex_timestamp]
+    }
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        claimed: MapSet.put(state.claimed, issue_id),
+        blocked: Map.put(state.blocked, issue_id, blocked_entry),
+        finops_circuit: finops_circuit_state(error)
+    }
+    |> record_audit_event(:issue_blocked, %{
+      issue_id: issue_id,
+      identifier: blocked_entry.identifier,
+      reason: error,
+      guard: metadata[:guard],
+      attempt: metadata[:attempt]
+    })
+  end
+
+  defp finops_circuit_state("max_" <> _ = reason),
+    do: %{status: :open, reason: reason, opened_at: DateTime.utc_now()}
+
+  defp finops_circuit_state("finops_guard" <> _ = reason),
+    do: %{status: :open, reason: reason, opened_at: DateTime.utc_now()}
+
+  defp finops_circuit_state(_reason), do: nil
+
+  defp record_audit_event(%State{} = state, event, metadata) when is_atom(event) and is_map(metadata) do
+    entry =
+      metadata
+      |> Map.put(:event, event)
+      |> Map.put(:recorded_at, DateTime.utc_now())
+
+    %{state | audit_events: [entry | state.audit_events]}
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
@@ -1585,7 +1868,8 @@ defmodule SymphonyElixir.Orchestrator do
           blocked_at: Map.get(metadata, :blocked_at),
           last_codex_timestamp: Map.get(metadata, :last_codex_timestamp),
           last_codex_message: Map.get(metadata, :last_codex_message),
-          last_codex_event: Map.get(metadata, :last_codex_event)
+          last_codex_event: Map.get(metadata, :last_codex_event),
+          evidence: Map.get(metadata, :evidence)
         }
       end)
 
@@ -1594,6 +1878,8 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       finops_circuit: state.finops_circuit,
+       audit_events: state.audit_events,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{

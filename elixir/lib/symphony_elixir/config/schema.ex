@@ -349,7 +349,11 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :issue_ids, :required_labels, :capabilities, :worker_host, :ignore_retries], empty_values: [])
+      |> cast(
+        attrs,
+        [:enabled, :issue_ids, :required_labels, :capabilities, :worker_host, :ignore_retries],
+        empty_values: []
+      )
       |> update_change(:issue_ids, &normalize_tokens/1)
       |> update_change(:required_labels, &normalize_labels/1)
       |> update_change(:capabilities, &normalize_capabilities/1)
@@ -363,13 +367,17 @@ defmodule SymphonyElixir.Config.Schema do
         |> validate_length(:issue_ids, is: 1)
         |> validate_length(:capabilities, is: 1)
         |> validate_required([:worker_host])
-        |> validate_change(:worker_host, fn :worker_host, value ->
-          if is_binary(value) and String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
-        end)
+        |> validate_change(:worker_host, &validate_worker_host/2)
       else
         changeset
       end
     end
+
+    defp validate_worker_host(:worker_host, value) when is_binary(value) do
+      if String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
+    end
+
+    defp validate_worker_host(:worker_host, _value), do: [worker_host: "can't be blank"]
 
     defp normalize_tokens(values) when is_list(values) do
       values
@@ -406,6 +414,150 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp normalize_optional_string(value), do: value
+  end
+
+  defmodule Mission do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:id, :string)
+      field(:issue_ids, {:array, :string}, default: [])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :id, :issue_ids], empty_values: [])
+      |> update_change(:id, &normalize_optional_string/1)
+      |> update_change(:issue_ids, &normalize_tokens/1)
+      |> validate_mission_contract()
+    end
+
+    defp validate_mission_contract(changeset) do
+      if get_field(changeset, :enabled) do
+        changeset
+        |> validate_required([:id])
+        |> validate_length(:issue_ids, min: 1)
+      else
+        changeset
+      end
+    end
+
+    defp normalize_tokens(values) when is_list(values) do
+      values
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp normalize_tokens(_), do: []
+
+    defp normalize_optional_string(value) when is_binary(value) do
+      case String.trim(value) do
+        "" -> nil
+        trimmed -> trimmed
+      end
+    end
+
+    defp normalize_optional_string(value), do: value
+  end
+
+  defmodule RetryGuard do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:max_attempts_per_issue, :integer, default: 3)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :max_attempts_per_issue], empty_values: [])
+      |> validate_number(:max_attempts_per_issue, greater_than: 0)
+    end
+  end
+
+  defmodule FinopsGuard do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:max_tokens_per_issue, :integer)
+      field(:max_tokens_per_mission, :integer)
+      field(:max_turns_per_issue, :integer)
+      field(:max_retries_per_issue, :integer)
+      field(:max_observed_tokens, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :max_tokens_per_issue,
+          :max_tokens_per_mission,
+          :max_turns_per_issue,
+          :max_retries_per_issue,
+          :max_observed_tokens
+        ],
+        empty_values: []
+      )
+      |> validate_optional_positive(:max_tokens_per_issue)
+      |> validate_optional_positive(:max_tokens_per_mission)
+      |> validate_optional_positive(:max_turns_per_issue)
+      |> validate_optional_positive(:max_retries_per_issue)
+      |> validate_optional_positive(:max_observed_tokens)
+    end
+
+    defp validate_optional_positive(changeset, field) do
+      validate_change(changeset, field, fn ^field, value ->
+        cond do
+          is_nil(value) -> []
+          is_integer(value) and value > 0 -> []
+          true -> [{field, "must be a positive integer when configured"}]
+        end
+      end)
+    end
+  end
+
+  defmodule KillSwitch do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:reason, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :reason], empty_values: [])
+      |> validate_reason_when_enabled()
+    end
+
+    defp validate_reason_when_enabled(changeset) do
+      if get_field(changeset, :enabled) do
+        validate_required(changeset, [:reason])
+      else
+        changeset
+      end
+    end
   end
 
   defmodule Observability do
@@ -460,6 +612,10 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:pilot, Pilot, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:mission, Mission, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:retry_guard, RetryGuard, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:finops_guard, FinopsGuard, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:kill_switch, KillSwitch, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -556,6 +712,22 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:pilot, with: &Pilot.changeset/2)
+    |> cast_embed(:mission, with: &Mission.changeset/2)
+    |> cast_embed(:retry_guard, with: &RetryGuard.changeset/2)
+    |> cast_embed(:finops_guard, with: &FinopsGuard.changeset/2)
+    |> cast_embed(:kill_switch, with: &KillSwitch.changeset/2)
+    |> validate_single_admission_mode()
+  end
+
+  defp validate_single_admission_mode(changeset) do
+    pilot_enabled = get_field(changeset, :pilot).enabled
+    mission_enabled = get_field(changeset, :mission).enabled
+
+    if pilot_enabled and mission_enabled do
+      add_error(changeset, :mission, "cannot be enabled when pilot is enabled")
+    else
+      changeset
+    end
   end
 
   defp finalize_settings(settings) do
