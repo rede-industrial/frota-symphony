@@ -100,6 +100,179 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "MISSION_ALLOWLIST_PASS only mission issues are dispatch candidates" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      mission_enabled: true,
+      mission_id: "FROTA-INAUGURAL-SIGMAWEB-V2-AUDIT-20260924",
+      mission_issue_ids: ["GH-136", "GH-137"]
+    )
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    allowed = %Issue{
+      id: "GH-136",
+      identifier: "GH-136",
+      title: "Mission issue",
+      state: "Todo",
+      dispatchable: true
+    }
+
+    denied = %Issue{
+      id: "GH-38",
+      identifier: "GH-38",
+      title: "Old backlog",
+      state: "Todo",
+      dispatchable: true
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(allowed, state)
+    refute Orchestrator.should_dispatch_issue_for_test(denied, state)
+  end
+
+  test "OLD_BACKLOG_DENIED_PASS mission rejects historical backlog even when otherwise active" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      mission_enabled: true,
+      mission_id: "FROTA-INAUGURAL-SIGMAWEB-V2-AUDIT-20260924",
+      mission_issue_ids: ["GH-136", "GH-137", "GH-138", "GH-139", "GH-140", "GH-141", "GH-142"]
+    )
+
+    old_backlog = %Issue{
+      id: "GH-74",
+      identifier: "GH-74",
+      title: "Historical backlog must stay out",
+      state: "In Progress",
+      dispatchable: true
+    }
+
+    refute Orchestrator.mission_issue_allowed_for_test(old_backlog)
+  end
+
+  test "PILOT_CONTRACT_PRESERVED_PASS pilot remains exactly one issue and one capability" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pilot_enabled: true,
+      pilot_issue_ids: ["GH-136"],
+      pilot_capabilities: ["SYSTEM_ANALYSIS"],
+      pilot_worker_host: "norma"
+    )
+
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pilot_enabled: true,
+      pilot_issue_ids: ["GH-136", "GH-137"],
+      pilot_capabilities: ["SYSTEM_ANALYSIS"],
+      pilot_worker_host: "norma"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "pilot.issue_ids"
+  end
+
+  test "AMBIGUOUS_MODE_FAIL_CLOSED_PASS mission and pilot cannot both be active" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pilot_enabled: true,
+      pilot_issue_ids: ["GH-136"],
+      pilot_capabilities: ["SYSTEM_ANALYSIS"],
+      pilot_worker_host: "norma",
+      mission_enabled: true,
+      mission_id: "FROTA-INAUGURAL-SIGMAWEB-V2-AUDIT-20260924",
+      mission_issue_ids: ["GH-136", "GH-137"]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "mission"
+    assert message =~ "cannot be enabled when pilot is enabled"
+  end
+
+  test "RETRY_STORM_POSSIBLE=NO attempt 4 is blocked without a new retry timer" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      retry_guard_enabled: true,
+      retry_guard_max_attempts_per_issue: 3
+    )
+
+    base_state = %Orchestrator.State{
+      retry_attempts: %{},
+      blocked: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    issue = %Issue{id: "GH-136", identifier: "GH-136", url: "https://example.test/GH-136"}
+
+    allowed_attempts =
+      for attempt <- [1, 2, 3] do
+        Orchestrator.schedule_issue_retry_for_test(base_state, "GH-136", attempt, %{
+          identifier: "GH-136",
+          issue: issue,
+          issue_url: issue.url,
+          error: "synthetic failure"
+        })
+      end
+
+    assert Enum.all?(Enum.zip([1, 2, 3], allowed_attempts), fn {attempt, state} ->
+             get_in(state.retry_attempts, ["GH-136", :attempt]) == attempt and
+               !Map.has_key?(state.blocked, "GH-136")
+           end)
+
+    blocked_state =
+      Orchestrator.schedule_issue_retry_for_test(base_state, "GH-136", 4, %{
+        identifier: "GH-136",
+        issue: issue,
+        issue_url: issue.url,
+        error: "synthetic failure"
+      })
+
+    refute Map.has_key?(blocked_state.retry_attempts, "GH-136")
+    assert get_in(blocked_state.blocked, ["GH-136", :error]) =~ "retry_guard"
+    assert %DateTime{} = get_in(blocked_state.blocked, ["GH-136", :blocked_at])
+  end
+
+  test "FINOPS circuit breaker opens locally and denies dispatch" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_observed_tokens: 10,
+      finops_guard_max_tokens_per_mission: 10,
+      finops_guard_max_retries_per_issue: 3
+    )
+
+    state = %Orchestrator.State{
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 10, seconds_running: 0},
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{}
+    }
+
+    issue = %Issue{id: "GH-136", identifier: "GH-136", title: "Mission", state: "Todo", dispatchable: true}
+
+    assert {:open, reason} = Orchestrator.finops_circuit_open_for_test(state, issue, 1)
+    assert reason == "max_observed_tokens exceeded"
+
+    retry_blocked =
+      Orchestrator.schedule_issue_retry_for_test(state, "GH-136", 1, %{
+        identifier: "GH-136",
+        issue: issue,
+        issue_url: "https://example.test/GH-136",
+        error: "would retry"
+      })
+
+    assert retry_blocked.finops_circuit.status == :open
+    refute Map.has_key?(retry_blocked.retry_attempts, "GH-136")
+    assert get_in(retry_blocked.blocked, ["GH-136", :error]) == "max_observed_tokens exceeded"
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
@@ -307,6 +480,9 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    lkg_path = WorkflowStore.last_known_good_path(Workflow.workflow_file_path())
+    assert File.exists?(lkg_path)
+    lkg_content = File.read!(lkg_path)
 
     assert {:ok, runtime_pid} =
              SymphonyElixir.AgentRuntimeSupervisor.start_link(
@@ -326,6 +502,7 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:error, :missing_linear_project_slug} = Config.validate!()
     assert Config.settings!().tracker.kind == "memory"
+    assert File.read!(lkg_path) == lkg_content
 
     Process.exit(original_orchestrator_pid, :kill)
 
@@ -1216,6 +1393,7 @@ defmodule SymphonyElixir.CoreTest do
     assert state.retry_attempts == %{}
     assert MapSet.member?(state.claimed, issue_id)
     assert state.running == %{}
+
     assert %{
              issue_id: ^issue_id,
              identifier: "GH-101",

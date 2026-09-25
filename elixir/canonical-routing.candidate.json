@@ -1,0 +1,97 @@
+{
+  "schema_version": "2026-09-25.pre-inauguration.v1",
+  "queue": {
+    "repository": "rede-industrial/frota-control-center",
+    "active_states": [
+      "open"
+    ],
+    "required_labels": [
+      "symphony-safe-pilot-20260911"
+    ],
+    "terminal_states": [
+      "closed"
+    ],
+    "eligibility_policy": "Issue must be open, in the configured mission allowlist, carry every required queue label, and carry exactly one known capability label."
+  },
+  "remote_destinations": {
+    "norma": {
+      "agent_id": "norma",
+      "display_name": "Norma"
+    },
+    "margareth": {
+      "agent_id": "margareth",
+      "display_name": "Margareth"
+    },
+    "estela": {
+      "agent_id": "estela",
+      "display_name": "Estela"
+    },
+    "carla": {
+      "agent_id": "carla",
+      "display_name": "Carla"
+    },
+    "pedro": {
+      "agent_id": "pedro",
+      "display_name": "Pedro"
+    },
+    "vitoria": {
+      "agent_id": "vitoria",
+      "display_name": "Vitoria"
+    },
+    "gabriela": {
+      "agent_id": "gabriela",
+      "display_name": "Gabriela"
+    }
+  },
+  "routes": [
+    {
+      "agent_id": "norma",
+      "display_name": "Norma",
+      "capability": "SYSTEM_ANALYSIS",
+      "required_issue_label": "capability:system-analysis",
+      "destination_id": "norma"
+    },
+    {
+      "agent_id": "margareth",
+      "display_name": "Margareth",
+      "capability": "ARCHITECTURE",
+      "required_issue_label": "capability:architecture",
+      "destination_id": "margareth"
+    },
+    {
+      "agent_id": "estela",
+      "display_name": "Estela",
+      "capability": "QUALITY_ENGINEERING",
+      "required_issue_label": "capability:quality-engineering",
+      "destination_id": "estela"
+    },
+    {
+      "agent_id": "carla",
+      "display_name": "Carla",
+      "capability": "BACKEND_ENGINEERING",
+      "required_issue_label": "capability:backend-engineering",
+      "destination_id": "carla"
+    },
+    {
+      "agent_id": "pedro",
+      "display_name": "Pedro",
+      "capability": "INFRA_DEVOPS",
+      "required_issue_label": "capability:infra-devops",
+      "destination_id": "pedro"
+    },
+    {
+      "agent_id": "vitoria",
+      "display_name": "Vitoria",
+      "capability": "FRONTEND_ENGINEERING",
+      "required_issue_label": "capability:frontend-engineering",
+      "destination_id": "vitoria"
+    },
+    {
+      "agent_id": "gabriela",
+      "display_name": "Gabriela",
+      "capability": "EXECUTION_AUXILIARY",
+      "required_issue_label": "capability:execution-auxiliary",
+      "destination_id": "gabriela"
+    }
+  ]
+}

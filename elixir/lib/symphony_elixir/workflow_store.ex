@@ -62,6 +62,12 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  @spec last_known_good_path(Path.t() | nil) :: Path.t()
+  def last_known_good_path(path \\ nil) do
+    path = path || Workflow.workflow_file_path()
+    Path.join(Path.dirname(path), "WORKFLOW.last-known-good")
+  end
+
   @impl true
   def init(_opts) do
     case load_state(Workflow.workflow_file_path()) do
@@ -159,10 +165,24 @@ defmodule SymphonyElixir.WorkflowStore do
          {:ok, settings} <- Schema.parse(workflow.config),
          :ok <- Config.validate_settings(settings),
          {:ok, stamp} <- current_stamp(path) do
+      persist_last_known_good(path)
       {:ok, %State{path: path, stamp: stamp, workflow: workflow, settings: settings}}
     else
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp persist_last_known_good(path) do
+    lkg_path = last_known_good_path(path)
+
+    case File.cp(path, lkg_path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Unable to persist last known good workflow path=#{lkg_path} reason=#{inspect(reason)}")
+        :ok
     end
   end
 

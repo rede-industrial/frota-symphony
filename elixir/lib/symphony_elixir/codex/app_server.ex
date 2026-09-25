@@ -223,11 +223,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   @doc false
+  @spec remote_launch_command_for_test(Path.t(), String.t(), atom()) :: {:ok, String.t()} | {:error, term()}
   def remote_launch_command_for_test(workspace, worker_host, remote_platform \\ :windows) do
     remote_launch_command(workspace, worker_host, %{secret_environment_names: []}, remote_platform)
   end
 
   @doc false
+  @spec codex_executable_check_command_for_test(String.t(), atom()) :: String.t()
   def codex_executable_check_command_for_test(worker_host, remote_platform \\ :windows) do
     codex_executable_check_command(worker_host, remote_platform)
   end

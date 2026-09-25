@@ -132,6 +132,17 @@ defmodule SymphonyElixir.TestSupport do
           pilot_capabilities: [],
           pilot_worker_host: nil,
           pilot_ignore_retries: false,
+          mission_enabled: false,
+          mission_id: nil,
+          mission_issue_ids: [],
+          retry_guard_enabled: false,
+          retry_guard_max_attempts_per_issue: 3,
+          finops_guard_enabled: false,
+          finops_guard_max_tokens_per_issue: nil,
+          finops_guard_max_tokens_per_mission: nil,
+          finops_guard_max_turns_per_issue: nil,
+          finops_guard_max_retries_per_issue: nil,
+          finops_guard_max_observed_tokens: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -179,6 +190,17 @@ defmodule SymphonyElixir.TestSupport do
     pilot_capabilities = Keyword.get(config, :pilot_capabilities)
     pilot_worker_host = Keyword.get(config, :pilot_worker_host)
     pilot_ignore_retries = Keyword.get(config, :pilot_ignore_retries)
+    mission_enabled = Keyword.get(config, :mission_enabled)
+    mission_id = Keyword.get(config, :mission_id)
+    mission_issue_ids = Keyword.get(config, :mission_issue_ids)
+    retry_guard_enabled = Keyword.get(config, :retry_guard_enabled)
+    retry_guard_max_attempts_per_issue = Keyword.get(config, :retry_guard_max_attempts_per_issue)
+    finops_guard_enabled = Keyword.get(config, :finops_guard_enabled)
+    finops_guard_max_tokens_per_issue = Keyword.get(config, :finops_guard_max_tokens_per_issue)
+    finops_guard_max_tokens_per_mission = Keyword.get(config, :finops_guard_max_tokens_per_mission)
+    finops_guard_max_turns_per_issue = Keyword.get(config, :finops_guard_max_turns_per_issue)
+    finops_guard_max_retries_per_issue = Keyword.get(config, :finops_guard_max_retries_per_issue)
+    finops_guard_max_observed_tokens = Keyword.get(config, :finops_guard_max_observed_tokens)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -216,6 +238,16 @@ defmodule SymphonyElixir.TestSupport do
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         pilot_yaml(pilot_enabled, pilot_issue_ids, pilot_required_labels, pilot_capabilities, pilot_worker_host, pilot_ignore_retries),
+        mission_yaml(mission_enabled, mission_id, mission_issue_ids),
+        retry_guard_yaml(retry_guard_enabled, retry_guard_max_attempts_per_issue),
+        finops_guard_yaml(
+          finops_guard_enabled,
+          finops_guard_max_tokens_per_issue,
+          finops_guard_max_tokens_per_mission,
+          finops_guard_max_turns_per_issue,
+          finops_guard_max_retries_per_issue,
+          finops_guard_max_observed_tokens
+        ),
         "---",
         prompt
       ]
@@ -274,6 +306,51 @@ defmodule SymphonyElixir.TestSupport do
       "  capabilities: #{yaml_value(capabilities)}",
       "  worker_host: #{yaml_value(worker_host)}",
       "  ignore_retries: #{yaml_value(ignore_retries)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp mission_yaml(false, nil, []), do: nil
+
+  defp mission_yaml(enabled, id, issue_ids) do
+    [
+      "mission:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  id: #{yaml_value(id)}",
+      "  issue_ids: #{yaml_value(issue_ids)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp retry_guard_yaml(false, 3), do: nil
+
+  defp retry_guard_yaml(enabled, max_attempts_per_issue) do
+    [
+      "retry_guard:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  max_attempts_per_issue: #{yaml_value(max_attempts_per_issue)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp finops_guard_yaml(false, nil, nil, nil, nil, nil), do: nil
+
+  defp finops_guard_yaml(
+         enabled,
+         max_tokens_per_issue,
+         max_tokens_per_mission,
+         max_turns_per_issue,
+         max_retries_per_issue,
+         max_observed_tokens
+       ) do
+    [
+      "finops_guard:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  max_tokens_per_issue: #{yaml_value(max_tokens_per_issue)}",
+      "  max_tokens_per_mission: #{yaml_value(max_tokens_per_mission)}",
+      "  max_turns_per_issue: #{yaml_value(max_turns_per_issue)}",
+      "  max_retries_per_issue: #{yaml_value(max_retries_per_issue)}",
+      "  max_observed_tokens: #{yaml_value(max_observed_tokens)}"
     ]
     |> Enum.join("\n")
   end
