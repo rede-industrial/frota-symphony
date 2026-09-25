@@ -273,6 +273,214 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(retry_blocked.blocked, ["GH-136", :error]) == "max_observed_tokens exceeded"
   end
 
+  test "AG001_ISSUE_BUDGET_BREAKER enforces per-issue budget without killing Symphony" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_tokens_per_issue: 10
+    )
+
+    issue = ag001_issue()
+    allowed_state = ag001_finops_state(running: %{"GH-136" => ag001_running_entry(issue, codex_total_tokens: 9)})
+    exceeded_state = ag001_finops_state(running: %{"GH-136" => ag001_running_entry(issue, codex_total_tokens: 10)})
+
+    assert :closed = Orchestrator.finops_circuit_open_for_test(allowed_state, issue, 1)
+    assert {:open, "max_tokens_per_issue exceeded"} = Orchestrator.finops_circuit_open_for_test(exceeded_state, issue, 1)
+
+    assert_ag001_finops_excess_blocks_dispatch_and_retry(exceeded_state, issue, "max_tokens_per_issue exceeded")
+  end
+
+  test "AG001_MISSION_BUDGET_BREAKER enforces mission budget without killing Symphony" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_tokens_per_mission: 10
+    )
+
+    issue = ag001_issue()
+    allowed_state = ag001_finops_state(codex_total_tokens: 9)
+    exceeded_state = ag001_finops_state(codex_total_tokens: 10)
+
+    assert :closed = Orchestrator.finops_circuit_open_for_test(allowed_state, issue, 1)
+    assert {:open, "max_tokens_per_mission exceeded"} = Orchestrator.finops_circuit_open_for_test(exceeded_state, issue, 1)
+
+    assert_ag001_finops_excess_blocks_dispatch_and_retry(exceeded_state, issue, "max_tokens_per_mission exceeded")
+  end
+
+  test "AG001_TURN_BUDGET_BREAKER enforces turn budget without killing Symphony" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_turns_per_issue: 4
+    )
+
+    issue = ag001_issue()
+    allowed_state = ag001_finops_state(running: %{"GH-136" => ag001_running_entry(issue, turn_count: 3)})
+    exceeded_state = ag001_finops_state(running: %{"GH-136" => ag001_running_entry(issue, turn_count: 4)})
+
+    assert :closed = Orchestrator.finops_circuit_open_for_test(allowed_state, issue, 1)
+    assert {:open, "max_turns_per_issue exceeded"} = Orchestrator.finops_circuit_open_for_test(exceeded_state, issue, 1)
+
+    assert_ag001_finops_excess_blocks_dispatch_and_retry(exceeded_state, issue, "max_turns_per_issue exceeded")
+  end
+
+  test "AG001_RETRY_BUDGET_BREAKER enforces FinOps retry budget without killing Symphony" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_retries_per_issue: 3
+    )
+
+    issue = ag001_issue()
+    state = ag001_finops_state()
+
+    assert :closed = Orchestrator.finops_circuit_open_for_test(state, issue, 3)
+    assert {:open, "max_retries_per_issue exceeded"} = Orchestrator.finops_circuit_open_for_test(state, issue, 4)
+
+    assert_ag001_finops_excess_blocks_dispatch_and_retry(state, issue, "max_retries_per_issue exceeded", 4)
+  end
+
+  test "AG001_ACCUMULATED_BUDGET_BREAKER enforces observed Symphony budget without killing Symphony" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true,
+      finops_guard_max_observed_tokens: 10
+    )
+
+    issue = ag001_issue()
+    allowed_state = ag001_finops_state(codex_total_tokens: 9)
+    exceeded_state = ag001_finops_state(codex_total_tokens: 10)
+
+    assert :closed = Orchestrator.finops_circuit_open_for_test(allowed_state, issue, 1)
+    assert {:open, "max_observed_tokens exceeded"} = Orchestrator.finops_circuit_open_for_test(exceeded_state, issue, 1)
+
+    assert_ag001_finops_excess_blocks_dispatch_and_retry(exceeded_state, issue, "max_observed_tokens exceeded")
+  end
+
+  test "AG001_RETRY_STORM_DENIED blocks attempt 4 without a Codex call" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      retry_guard_enabled: true,
+      retry_guard_max_attempts_per_issue: 3
+    )
+
+    issue = ag001_issue()
+    state = ag001_finops_state()
+
+    blocked_state =
+      Orchestrator.schedule_issue_retry_for_test(state, "GH-136", 4, %{
+        identifier: issue.identifier,
+        issue: issue,
+        issue_url: issue.url,
+        error: "synthetic retry storm"
+      })
+
+    refute Map.has_key?(blocked_state.retry_attempts, "GH-136")
+    assert blocked_state.running == state.running
+    assert get_in(blocked_state.blocked, ["GH-136", :error]) =~ "retry_guard"
+    assert Enum.any?(blocked_state.audit_events, &(&1.event == :issue_blocked))
+    assert Process.alive?(self())
+  end
+
+  test "AG001_BACKLOG_OUTSIDE_MISSION_DENIED rejects issues outside mission allowlist" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      mission_enabled: true,
+      mission_id: "FROTA-INAUGURAL-SIGMAWEB-V2-AUDIT-20260924",
+      mission_issue_ids: ["GH-136", "GH-137", "GH-138", "GH-139", "GH-140", "GH-141", "GH-142"]
+    )
+
+    refute Orchestrator.mission_issue_allowed_for_test(%Issue{
+             id: "GH-74",
+             identifier: "GH-74",
+             title: "Historical backlog",
+             state: "Todo",
+             dispatchable: true
+           })
+  end
+
+  test "AG001_INVALID_WORKFLOW_DENIED keeps live workflow unchanged" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    live_path = Path.join(workflow_dir, "WORKFLOW.live")
+    candidate_path = Path.join(workflow_dir, "WORKFLOW.candidate")
+    lkg_path = Path.join(workflow_dir, "WORKFLOW.invalid-candidate.last-known-good")
+
+    write_workflow_file!(live_path, tracker_kind: "memory", poll_interval_ms: 31_000)
+    live_before = File.read!(live_path)
+
+    write_workflow_file!(candidate_path,
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: nil
+    )
+
+    assert {:error, {:preflight_failed, :missing_linear_project_slug}, audit} =
+             WorkflowStore.promote_candidate(live_path, candidate_path, last_known_good_path: lkg_path)
+
+    assert File.read!(live_path) == live_before
+    refute File.exists?(lkg_path)
+    assert Enum.any?(audit, &(&1.event == :workflow_preflight_failed))
+  end
+
+  test "AG001_WORKFLOW_HEALTH_ROLLBACK restores LKG and rechecks health" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    live_path = Path.join(workflow_dir, "WORKFLOW.live")
+    candidate_path = Path.join(workflow_dir, "WORKFLOW.candidate")
+
+    write_workflow_file!(live_path, tracker_kind: "memory", poll_interval_ms: 31_000)
+    write_workflow_file!(candidate_path, tracker_kind: "memory", poll_interval_ms: 45_000)
+
+    live_before = File.read!(live_path)
+    candidate_content = File.read!(candidate_path)
+
+    health_check = fn path ->
+      if File.read!(path) == candidate_content, do: {:error, :unhealthy_candidate}, else: :ok
+    end
+
+    assert {:error, {:rolled_back, {:error, :unhealthy_candidate}}, audit} =
+             WorkflowStore.promote_candidate(live_path, candidate_path, health_check: health_check)
+
+    assert File.read!(live_path) == live_before
+    assert File.read!(WorkflowStore.last_known_good_path(live_path)) == live_before
+    assert Enum.any?(audit, &(&1.event == :last_known_good_preserved))
+    assert Enum.any?(audit, &(&1.event == :atomic_promotion))
+    assert Enum.any?(audit, &(&1.event == :health_check_failed))
+    assert Enum.any?(audit, &(&1.event == :automatic_rollback))
+    assert Enum.any?(audit, &(&1.event == :rollback_health_check_passed))
+  end
+
+  test "AG001_LKG_RECOVERY keeps valid candidate on health pass and fail-closes rollback health failure" do
+    workflow_dir = Workflow.workflow_file_path() |> Path.dirname()
+    live_path = Path.join(workflow_dir, "WORKFLOW.live")
+    candidate_path = Path.join(workflow_dir, "WORKFLOW.candidate")
+
+    write_workflow_file!(live_path, tracker_kind: "memory", poll_interval_ms: 31_000)
+    write_workflow_file!(candidate_path, tracker_kind: "memory", poll_interval_ms: 45_000)
+
+    live_before = File.read!(live_path)
+    candidate_content = File.read!(candidate_path)
+
+    assert {:ok, pass_audit} = WorkflowStore.promote_candidate(live_path, candidate_path)
+    assert File.read!(live_path) == candidate_content
+    assert File.read!(WorkflowStore.last_known_good_path(live_path)) == live_before
+    assert Enum.any?(pass_audit, &(&1.event == :health_check_passed))
+
+    write_workflow_file!(candidate_path, tracker_kind: "memory", poll_interval_ms: 60_000)
+
+    assert {:error, {:rollback_failed, {:error, :candidate_unhealthy}, {:error, :rollback_unhealthy}}, fail_audit} =
+             WorkflowStore.promote_candidate(live_path, candidate_path,
+               health_check: fn path ->
+                 if File.read!(path) == File.read!(candidate_path),
+                   do: {:error, :candidate_unhealthy},
+                   else: {:error, :rollback_unhealthy}
+               end
+             )
+
+    assert File.read!(live_path) == candidate_content
+    assert Enum.any?(fail_audit, &(&1.event == :rollback_health_check_failed))
+    assert Enum.any?(fail_audit, &(&1.event == :fail_closed))
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
@@ -2931,5 +3139,72 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp ag001_issue do
+    %Issue{
+      id: "GH-136",
+      identifier: "GH-136",
+      title: "AG-001 guarded issue",
+      state: "Todo",
+      url: "https://example.test/GH-136",
+      dispatchable: true
+    }
+  end
+
+  defp ag001_finops_state(opts \\ []) do
+    total_tokens = Keyword.get(opts, :codex_total_tokens, 0)
+
+    %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: Keyword.get(opts, :running, %{}),
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      codex_totals: %{
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: total_tokens,
+        seconds_running: 0
+      }
+    }
+  end
+
+  defp ag001_running_entry(issue, opts) do
+    %{
+      issue: issue,
+      identifier: issue.identifier,
+      worker_host: "norma",
+      workspace_path: "/tmp/ag001",
+      session_id: "session-ag001",
+      codex_total_tokens: Keyword.get(opts, :codex_total_tokens, 0),
+      turn_count: Keyword.get(opts, :turn_count, 0)
+    }
+  end
+
+  defp assert_ag001_finops_excess_blocks_dispatch_and_retry(state, issue, reason, attempt \\ 1) do
+    dispatch_blocked = Orchestrator.dispatch_issue_for_test(state, issue, attempt)
+
+    assert dispatch_blocked.finops_circuit.status == :open
+    assert dispatch_blocked.finops_circuit.reason == reason
+    assert dispatch_blocked.running == state.running
+    assert get_in(dispatch_blocked.blocked, [issue.id, :error]) == reason
+    assert Enum.any?(dispatch_blocked.audit_events, &(&1.event == :issue_blocked and &1.reason == reason))
+
+    retry_blocked =
+      Orchestrator.schedule_issue_retry_for_test(state, issue.id, attempt, %{
+        identifier: issue.identifier,
+        issue: issue,
+        issue_url: issue.url,
+        error: "synthetic FinOps excess"
+      })
+
+    refute Map.has_key?(retry_blocked.retry_attempts, issue.id)
+    assert retry_blocked.finops_circuit.status == :open
+    assert retry_blocked.finops_circuit.reason == reason
+    assert retry_blocked.running == state.running
+    assert get_in(retry_blocked.blocked, [issue.id, :error]) == reason
+    assert Enum.any?(retry_blocked.audit_events, &(&1.event == :issue_blocked and &1.reason == reason))
+    assert Process.alive?(self())
   end
 end

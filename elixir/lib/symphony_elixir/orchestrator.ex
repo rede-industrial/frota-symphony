@@ -41,7 +41,8 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
-      finops_circuit: nil
+      finops_circuit: nil,
+      audit_events: []
     ]
   end
 
@@ -409,6 +410,12 @@ defmodule SymphonyElixir.Orchestrator do
   def schedule_issue_retry_for_test(%State{} = state, issue_id, attempt, metadata)
       when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) do
     schedule_issue_retry(state, issue_id, attempt, metadata)
+  end
+
+  @doc false
+  @spec dispatch_issue_for_test(term(), Issue.t(), non_neg_integer() | nil, String.t() | nil) :: term()
+  def dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ 1, preferred_worker_host \\ nil) do
+    do_dispatch_issue(state, issue, attempt, preferred_worker_host)
   end
 
   @doc false
@@ -1502,12 +1509,28 @@ defmodule SymphonyElixir.Orchestrator do
         blocked: Map.put(state.blocked, issue_id, blocked_entry),
         finops_circuit: finops_circuit_state(error)
     }
+    |> record_audit_event(:issue_blocked, %{
+      issue_id: issue_id,
+      identifier: blocked_entry.identifier,
+      reason: error,
+      guard: metadata[:guard],
+      attempt: metadata[:attempt]
+    })
   end
 
   defp finops_circuit_state("max_" <> _ = reason),
     do: %{status: :open, reason: reason, opened_at: DateTime.utc_now()}
 
   defp finops_circuit_state(_reason), do: nil
+
+  defp record_audit_event(%State{} = state, event, metadata) when is_atom(event) and is_map(metadata) do
+    entry =
+      metadata
+      |> Map.put(:event, event)
+      |> Map.put(:recorded_at, DateTime.utc_now())
+
+    %{state | audit_events: [entry | state.audit_events]}
+  end
 
   defp release_issue_claim(%State{} = state, issue_id) do
     %{
@@ -1786,6 +1809,7 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        finops_circuit: state.finops_circuit,
+       audit_events: state.audit_events,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
