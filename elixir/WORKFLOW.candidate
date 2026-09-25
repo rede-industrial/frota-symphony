@@ -67,6 +67,10 @@ finops_guard:
   max_retries_per_issue: 3
   max_observed_tokens: 1000000
 
+kill_switch:
+  enabled: false
+  reason: null
+
 codex:
   command: /usr/local/bin/codex app-server
   executables:

@@ -143,6 +143,8 @@ defmodule SymphonyElixir.TestSupport do
           finops_guard_max_turns_per_issue: nil,
           finops_guard_max_retries_per_issue: nil,
           finops_guard_max_observed_tokens: nil,
+          kill_switch_enabled: false,
+          kill_switch_reason: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -201,6 +203,8 @@ defmodule SymphonyElixir.TestSupport do
     finops_guard_max_turns_per_issue = Keyword.get(config, :finops_guard_max_turns_per_issue)
     finops_guard_max_retries_per_issue = Keyword.get(config, :finops_guard_max_retries_per_issue)
     finops_guard_max_observed_tokens = Keyword.get(config, :finops_guard_max_observed_tokens)
+    kill_switch_enabled = Keyword.get(config, :kill_switch_enabled)
+    kill_switch_reason = Keyword.get(config, :kill_switch_reason)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -237,7 +241,14 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
-        pilot_yaml(pilot_enabled, pilot_issue_ids, pilot_required_labels, pilot_capabilities, pilot_worker_host, pilot_ignore_retries),
+        pilot_yaml(
+          pilot_enabled,
+          pilot_issue_ids,
+          pilot_required_labels,
+          pilot_capabilities,
+          pilot_worker_host,
+          pilot_ignore_retries
+        ),
         mission_yaml(mission_enabled, mission_id, mission_issue_ids),
         retry_guard_yaml(retry_guard_enabled, retry_guard_max_attempts_per_issue),
         finops_guard_yaml(
@@ -248,6 +259,7 @@ defmodule SymphonyElixir.TestSupport do
           finops_guard_max_retries_per_issue,
           finops_guard_max_observed_tokens
         ),
+        kill_switch_yaml(kill_switch_enabled, kill_switch_reason),
         "---",
         prompt
       ]
@@ -351,6 +363,17 @@ defmodule SymphonyElixir.TestSupport do
       "  max_turns_per_issue: #{yaml_value(max_turns_per_issue)}",
       "  max_retries_per_issue: #{yaml_value(max_retries_per_issue)}",
       "  max_observed_tokens: #{yaml_value(max_observed_tokens)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp kill_switch_yaml(false, nil), do: nil
+
+  defp kill_switch_yaml(enabled, reason) do
+    [
+      "kill_switch:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  reason: #{yaml_value(reason)}"
     ]
     |> Enum.join("\n")
   end

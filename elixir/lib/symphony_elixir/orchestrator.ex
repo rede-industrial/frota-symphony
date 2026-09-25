@@ -1051,10 +1051,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
-    case finops_circuit_open?(state, issue, attempt) do
+    case autonomy_circuit_open?(state, issue, attempt) do
       {:open, reason} ->
-        Logger.warning("FinOps circuit open; blocking dispatch for #{issue_context(issue)} reason=#{reason}")
-        block_issue_from_issue(state, issue, reason, %{attempt: attempt, guard: :finops})
+        Logger.warning("Autonomy circuit open; blocking dispatch for #{issue_context(issue)} reason=#{reason}")
+        block_issue_from_issue(state, issue, reason, %{attempt: attempt, guard: guard_from_reason(reason)})
 
       :closed ->
         dispatch_issue_after_finops(state, issue, attempt, preferred_worker_host, recipient)
@@ -1173,6 +1173,11 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
 
     cond do
+      kill_switch_enabled?() ->
+        reason = kill_switch_reason()
+        Logger.warning("Kill switch open; blocking retry for issue_id=#{issue_id} attempt=#{next_attempt} reason=#{reason}")
+        block_issue_from_retry_metadata(state, issue_id, Map.merge(metadata, %{attempt: next_attempt, guard: :kill_switch}), reason)
+
       retry_guard_blocks_attempt?(next_attempt) ->
         reason = "retry_guard max_attempts_per_issue exceeded at attempt #{next_attempt}"
 
@@ -1233,6 +1238,37 @@ defmodule SymphonyElixir.Orchestrator do
             workspace_path: workspace_path
           })
     }
+    |> record_audit_event(:issue_retry_scheduled, %{
+      issue_id: issue_id,
+      identifier: identifier,
+      attempt: next_attempt,
+      error: error,
+      due_at_ms: due_at_ms
+    })
+  end
+
+  defp schedule_issue_slot_wait(%State{} = state, %Issue{} = issue, attempt, metadata) do
+    previous_retry = Map.get(state.retry_attempts, issue.id, %{attempt: attempt})
+    preserved_attempt = previous_retry[:attempt] || attempt || 0
+
+    do_schedule_issue_retry(
+      state,
+      issue.id,
+      preserved_attempt,
+      Map.merge(metadata, %{
+        issue: issue,
+        identifier: issue.identifier,
+        issue_url: issue.url,
+        error: "waiting for orchestrator slot",
+        guard: :slot_wait
+      })
+    )
+    |> record_audit_event(:issue_waiting_for_slot, %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      attempt: preserved_attempt,
+      reason: "no available orchestrator slots"
+    })
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -1384,19 +1420,9 @@ defmodule SymphonyElixir.Orchestrator do
            )}
       end
     else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+      Logger.debug("No available slots for retrying #{issue_context(issue)}; keeping issue pending without consuming retry attempt")
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           issue: issue,
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      {:noreply, schedule_issue_slot_wait(state, issue, attempt, metadata)}
     end
   end
 
@@ -1416,12 +1442,23 @@ defmodule SymphonyElixir.Orchestrator do
     match?({:open, _reason}, finops_circuit_open?(state, issue, attempt))
   end
 
+  defp autonomy_circuit_open?(%State{} = state, issue, attempt) do
+    if kill_switch_enabled?() do
+      {:open, kill_switch_reason()}
+    else
+      finops_circuit_open?(state, issue, attempt)
+    end
+  end
+
   defp finops_circuit_open?(%State{} = state, issue, attempt) do
     guard = Config.settings!().finops_guard
 
     cond do
       !guard.enabled ->
         :closed
+
+      !finops_guard_has_explicit_limit?(guard) ->
+        {:open, "finops_guard explicit limit not configured"}
 
       limit_exceeded?(state.codex_totals.total_tokens, guard.max_observed_tokens) ->
         {:open, "max_observed_tokens exceeded"}
@@ -1444,6 +1481,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp finops_circuit_open?(_state, _issue, _attempt), do: :closed
+
+  defp finops_guard_has_explicit_limit?(guard) do
+    [
+      guard.max_observed_tokens,
+      guard.max_tokens_per_mission,
+      guard.max_tokens_per_issue,
+      guard.max_turns_per_issue,
+      guard.max_retries_per_issue
+    ]
+    |> Enum.any?(&is_integer/1)
+  end
+
+  defp kill_switch_enabled? do
+    Config.settings!().kill_switch.enabled
+  end
+
+  defp kill_switch_reason do
+    reason = Config.settings!().kill_switch.reason
+
+    if is_binary(reason) and String.trim(reason) != "" do
+      "kill_switch enabled: #{String.trim(reason)}"
+    else
+      "kill_switch enabled"
+    end
+  end
+
+  defp guard_from_reason("kill_switch" <> _), do: :kill_switch
+  defp guard_from_reason("finops_guard" <> _), do: :finops
+  defp guard_from_reason("max_" <> _), do: :finops
+  defp guard_from_reason(_reason), do: nil
 
   defp limit_exceeded?(_value, nil), do: false
   defp limit_exceeded?(value, limit) when is_integer(value) and is_integer(limit), do: value >= limit
@@ -1519,6 +1586,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp finops_circuit_state("max_" <> _ = reason),
+    do: %{status: :open, reason: reason, opened_at: DateTime.utc_now()}
+
+  defp finops_circuit_state("finops_guard" <> _ = reason),
     do: %{status: :open, reason: reason, opened_at: DateTime.utc_now()}
 
   defp finops_circuit_state(_reason), do: nil

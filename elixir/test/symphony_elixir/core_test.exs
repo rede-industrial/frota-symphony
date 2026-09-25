@@ -273,6 +273,100 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(retry_blocked.blocked, ["GH-136", :error]) == "max_observed_tokens exceeded"
   end
 
+  test "FINOPS guard fails closed when enabled without an explicit valid limit" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      finops_guard_enabled: true
+    )
+
+    state = %Orchestrator.State{
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{}
+    }
+
+    issue = %Issue{id: "GH-136", identifier: "GH-136", title: "Mission", state: "Todo", dispatchable: true}
+
+    assert {:open, "finops_guard explicit limit not configured"} =
+             Orchestrator.finops_circuit_open_for_test(state, issue, 1)
+
+    blocked_state = Orchestrator.dispatch_issue_for_test(state, issue, 1)
+
+    assert blocked_state.running == %{}
+    assert get_in(blocked_state.blocked, ["GH-136", :error]) == "finops_guard explicit limit not configured"
+    assert Enum.any?(blocked_state.audit_events, &(&1.event == :issue_blocked and &1.guard == :finops))
+  end
+
+  test "NO_SLOT_DOES_NOT_RETRY keeps retry attempt stable while waiting for capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      retry_guard_enabled: true,
+      retry_guard_max_attempts_per_issue: 3
+    )
+
+    issue = %Issue{id: "GH-136", identifier: "GH-136", title: "Mission", state: "Todo", dispatchable: true}
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{"GH-127" => %{issue: %Issue{id: "GH-127"}, worker_host: "norma"}},
+      claimed: MapSet.new(["GH-136"]),
+      blocked: %{},
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue.id, 1, %{
+        identifier: issue.identifier,
+        issue: issue,
+        issue_url: issue.url,
+        error: "previous transient failure"
+      })
+
+    assert get_in(updated_state.retry_attempts, [issue.id, :attempt]) == 1
+    assert get_in(updated_state.retry_attempts, [issue.id, :error]) == "waiting for orchestrator slot"
+    refute Map.has_key?(updated_state.blocked, issue.id)
+    assert Enum.any?(updated_state.audit_events, &(&1.event == :issue_waiting_for_slot and &1.attempt == 1))
+  end
+
+  test "KILL_SWITCH_EFFECTIVE blocks new dispatch and retry without touching running work" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      kill_switch_enabled: true,
+      kill_switch_reason: "operator stop"
+    )
+
+    issue = %Issue{id: "GH-136", identifier: "GH-136", title: "Mission", state: "Todo", dispatchable: true}
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{"GH-127" => %{issue: %Issue{id: "GH-127"}, worker_host: "norma"}},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    dispatch_blocked = Orchestrator.dispatch_issue_for_test(state, issue, 1)
+
+    assert Map.has_key?(dispatch_blocked.running, "GH-127")
+    assert get_in(dispatch_blocked.blocked, [issue.id, :error]) == "kill_switch enabled: operator stop"
+    assert Enum.any?(dispatch_blocked.audit_events, &(&1.event == :issue_blocked and &1.guard == :kill_switch))
+
+    retry_blocked =
+      Orchestrator.schedule_issue_retry_for_test(state, issue.id, 1, %{
+        identifier: issue.identifier,
+        issue: issue,
+        issue_url: issue.url,
+        error: "would retry"
+      })
+
+    assert Map.has_key?(retry_blocked.running, "GH-127")
+    refute Map.has_key?(retry_blocked.retry_attempts, issue.id)
+    assert get_in(retry_blocked.blocked, [issue.id, :error]) == "kill_switch enabled: operator stop"
+  end
+
   test "AG001_ISSUE_BUDGET_BREAKER enforces per-issue budget without killing Symphony" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

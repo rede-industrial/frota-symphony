@@ -525,6 +525,33 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule KillSwitch do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:reason, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :reason], empty_values: [])
+      |> validate_reason_when_enabled()
+    end
+
+    defp validate_reason_when_enabled(changeset) do
+      if get_field(changeset, :enabled) do
+        validate_required(changeset, [:reason])
+      else
+        changeset
+      end
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -580,6 +607,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:mission, Mission, on_replace: :update, defaults_to_struct: true)
     embeds_one(:retry_guard, RetryGuard, on_replace: :update, defaults_to_struct: true)
     embeds_one(:finops_guard, FinopsGuard, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:kill_switch, KillSwitch, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -679,6 +707,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:mission, with: &Mission.changeset/2)
     |> cast_embed(:retry_guard, with: &RetryGuard.changeset/2)
     |> cast_embed(:finops_guard, with: &FinopsGuard.changeset/2)
+    |> cast_embed(:kill_switch, with: &KillSwitch.changeset/2)
     |> validate_single_admission_mode()
   end
 
