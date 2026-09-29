@@ -79,10 +79,10 @@ defmodule SymphonyElixirWeb.Presenter do
         restart_count: restart_count(retry),
         current_retry_attempt: retry_attempt(retry)
       },
-      running: running && running_issue_payload(running),
-      retry: retry && retry_issue_payload(retry),
-      blocked: blocked && blocked_issue_payload(blocked),
-      completed: completed && completed_issue_payload(completed),
+      running: optional_issue_payload(running, &running_issue_payload/1),
+      retry: optional_issue_payload(retry, &retry_issue_payload/1),
+      blocked: optional_issue_payload(blocked, &blocked_issue_payload/1),
+      completed: optional_issue_payload(completed, &completed_issue_payload/1),
       logs: %{
         codex_session_logs: []
       },
@@ -91,6 +91,9 @@ defmodule SymphonyElixirWeb.Presenter do
       tracked: %{}
     }
   end
+
+  defp optional_issue_payload(nil, _builder), do: nil
+  defp optional_issue_payload(entry, builder), do: builder.(entry)
 
   defp issue_id_from_entries(running, retry, blocked, completed),
     do:

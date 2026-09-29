@@ -636,7 +636,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "acceptForSession"
+                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "accept"
                else
                  false
                end
@@ -647,67 +647,74 @@ defmodule SymphonyElixir.AppServerTest do
   end
 
   test "app server rejects administrative windows commands under on-request policy" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-app-server-windows-admin-deny-#{System.unique_integer([:positive])}"
-      )
+    for {command, outside_workspace?} <- [
+          {"cmd.exe /c net user", false},
+          {"cmd.exe /c hostname & whoami", false},
+          {~s("C:\\Temp\\cmd.exe" /c hostname), false},
+          {"cmd.exe /c hostname", true}
+        ] do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-app-server-windows-admin-deny-#{System.unique_integer([:positive])}"
+        )
 
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      workspace = Path.join(workspace_root, "GH-173")
-      codex_binary = Path.join(test_root, "fake-codex")
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        workspace = Path.join(workspace_root, "GH-173")
+        codex_binary = Path.join(test_root, "fake-codex")
 
-      File.mkdir_p!(workspace)
+        File.mkdir_p!(workspace)
 
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
-      while IFS= read -r _line; do
-        count=$((count + 1))
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
 
-        case "$count" in
-          1)
-            printf '%s\\n' '{"id":1,"result":{}}'
-            ;;
-          2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-173"}}}'
-            ;;
-          3)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-173"}}}'
-            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"cmd.exe /c net user","cwd":"#{workspace}","reason":"admin command"}}'
-            ;;
-          *)
-            sleep 1
-            ;;
-        esac
-      done
-      """)
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-173"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-173"}}}'
+              printf '%s\\n' '#{Jason.encode!(%{"id" => 99, "method" => "item/commandExecution/requestApproval", "params" => %{"command" => command, "cwd" => if(outside_workspace?, do: test_root, else: workspace), "reason" => "negative diagnostic"}})}' 
+              ;;
+            *)
+              sleep 1
+              ;;
+          esac
+        done
+        """)
 
-      File.chmod!(codex_binary, 0o755)
+        File.chmod!(codex_binary, 0o755)
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server",
-        codex_approval_policy: "on-request"
-      )
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server",
+          codex_approval_policy: "on-request"
+        )
 
-      issue = %Issue{
-        id: "173",
-        identifier: "GH-173",
-        title: "Carla worker diagnostic",
-        description: "Reject admin command",
-        state: "open",
-        url: "https://github.com/rede-industrial/frota-control-center/issues/173",
-        labels: ["symphony-safe-pilot-20260911", "capability:backend-engineering"]
-      }
+        issue = %Issue{
+          id: "173",
+          identifier: "GH-173",
+          title: "Carla worker diagnostic",
+          description: "Reject admin command",
+          state: "open",
+          url: "https://github.com/rede-industrial/frota-control-center/issues/173",
+          labels: ["symphony-safe-pilot-20260911", "capability:backend-engineering"]
+        }
 
-      assert {:error, {:approval_required, payload}} =
-               AppServer.run(workspace, "Run diagnostics", issue)
+        assert {:error, {:approval_required, payload}} =
+                 AppServer.run(workspace, "Run diagnostics", issue)
 
-      assert get_in(payload, ["params", "command"]) == "cmd.exe /c net user"
-    after
-      File.rm_rf(test_root)
+        assert get_in(payload, ["params", "command"]) == command
+      after
+        File.rm_rf(test_root)
+      end
     end
   end
 

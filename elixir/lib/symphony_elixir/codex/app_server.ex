@@ -511,8 +511,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests,
-      %{workspace: workspace}
+      {auto_approve_requests, %{workspace: workspace}}
     )
   end
 
@@ -522,8 +521,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          timeout_ms,
          pending_line,
          tool_executor,
-         auto_approve_requests,
-         approval_context
+         {auto_approve_requests, approval_context}
        ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
@@ -535,8 +533,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           complete_line,
           timeout_ms,
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
 
       {^port, {:data, {:noeol, chunk}}} ->
@@ -546,8 +543,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
 
       {^port, {:exit_status, status}} ->
@@ -564,8 +560,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          data,
          timeout_ms,
          tool_executor,
-         auto_approve_requests,
-         approval_context
+         {auto_approve_requests, approval_context}
        ) do
     payload_string = to_string(data)
 
@@ -608,8 +603,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
 
       {:ok, payload} ->
@@ -629,8 +623,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           "",
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
 
       {:error, _reason} ->
@@ -654,8 +647,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           "",
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
     end
   end
@@ -681,8 +673,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests,
-         approval_context
+         {auto_approve_requests, approval_context}
        ) do
     metadata = metadata_from_message(port, payload)
 
@@ -694,8 +685,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            on_message,
            metadata,
            tool_executor,
-           auto_approve_requests,
-           approval_context
+           {auto_approve_requests, approval_context}
          ) do
       :input_required ->
         emit_message(
@@ -714,8 +704,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           "",
           tool_executor,
-          auto_approve_requests,
-          approval_context
+          {auto_approve_requests, approval_context}
         )
 
       :approval_required ->
@@ -757,8 +746,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             timeout_ms,
             "",
             tool_executor,
-            auto_approve_requests,
-            approval_context
+            {auto_approve_requests, approval_context}
           )
         end
     end
@@ -772,8 +760,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests,
-         approval_context
+         {auto_approve_requests, approval_context}
        ) do
     allow_request? =
       auto_approve_requests or workspace_diagnostic_command_approval?(payload, approval_context)
@@ -781,7 +768,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     approve_or_require(
       port,
       id,
-      "acceptForSession",
+      if(auto_approve_requests, do: "acceptForSession", else: "accept"),
       payload,
       payload_string,
       on_message,
@@ -798,8 +785,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          tool_executor,
-         _auto_approve_requests,
-         _approval_context
+         {_auto_approve_requests, _approval_context}
        ) do
     tool_name = tool_call_name(params)
     arguments = tool_call_arguments(params)
@@ -834,8 +820,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests,
-         _approval_context
+         {auto_approve_requests, _approval_context}
        ) do
     approve_or_require(
       port,
@@ -857,8 +842,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests,
-         _approval_context
+         {auto_approve_requests, _approval_context}
        ) do
     approve_or_require(
       port,
@@ -880,8 +864,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests,
-         _approval_context
+         {auto_approve_requests, _approval_context}
        ) do
     approve_or_require(
       port,
@@ -903,8 +886,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests,
-         _approval_context
+         {auto_approve_requests, _approval_context}
        ) do
     maybe_auto_answer_tool_request_user_input(
       port,
@@ -926,8 +908,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          _on_message,
          _metadata,
          _tool_executor,
-         _auto_approve_requests,
-         _approval_context
+         {_auto_approve_requests, _approval_context}
        ) do
     :unhandled
   end
@@ -1041,7 +1022,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     command
     |> String.trim()
     |> String.replace(
-      ~r{^(?:cmd(?:\.exe)?|"[^"]*[\\/]cmd(?:\.exe)?")\s+(?:/d\s+)?(?:/s\s+)?/c\s+}i,
+      ~r{^(?:cmd(?:\.exe)?|"C:[\\/]Windows[\\/]System32[\\/]cmd\.exe")\s+(?:/d\s+)?(?:/s\s+)?/c\s+}i,
       ""
     )
     |> trim_wrapping_quotes()

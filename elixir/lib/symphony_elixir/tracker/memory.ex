@@ -46,7 +46,7 @@ defmodule SymphonyElixir.Tracker.Memory do
       marker = {issue.id, completion[:session_id]}
 
       updated =
-        if Enum.any?(completions, fn entry -> {entry.issue_id, entry.completion[:session_id]} == marker end) do
+        if Enum.any?(completions, &({&1.issue_id, &1.completion[:session_id]} == marker)) do
           completions
         else
           [completion_record | completions]

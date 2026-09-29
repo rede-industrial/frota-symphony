@@ -246,8 +246,7 @@ defmodule SymphonyElixir.GitHub.Client do
     evidence =
       completion
       |> Map.get(:evidence, %{})
-      |> Enum.map(fn {key, value} -> "- #{key}: #{format_completion_value(value)}" end)
-      |> Enum.join("\n")
+      |> Enum.map_join("\n", fn {key, value} -> "- #{key}: #{format_completion_value(value)}" end)
 
     """
     #{marker}
