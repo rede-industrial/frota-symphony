@@ -549,6 +549,175 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows only workspace-local windows diagnostics under on-request policy" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-windows-diagnostics-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "GH-173")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-windows-diagnostics.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE:-/tmp/codex-windows-diagnostics.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-173"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-173"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"\\\"C:\\\\Windows\\\\System32\\\\cmd.exe\\\" /c hostname","cwd":"#{workspace}","reason":"diagnostic"}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "on-request"
+      )
+
+      issue = %Issue{
+        id: "173",
+        identifier: "GH-173",
+        title: "Carla worker diagnostic",
+        description: "Allow bounded cmd.exe diagnostics only",
+        state: "open",
+        url: "https://github.com/rede-industrial/frota-control-center/issues/173",
+        labels: ["symphony-safe-pilot-20260911", "capability:backend-engineering"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Run diagnostics", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "accept"
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server rejects administrative windows commands under on-request policy" do
+    for {command, outside_workspace?} <- [
+          {"cmd.exe /c net user", false},
+          {"cmd.exe /c hostname & whoami", false},
+          {~s("C:\\Temp\\cmd.exe" /c hostname), false},
+          {"cmd.exe /c hostname", true}
+        ] do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-app-server-windows-admin-deny-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        workspace = Path.join(workspace_root, "GH-173")
+        codex_binary = Path.join(test_root, "fake-codex")
+
+        File.mkdir_p!(workspace)
+
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-173"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-173"}}}'
+              printf '%s\\n' '#{Jason.encode!(%{"id" => 99, "method" => "item/commandExecution/requestApproval", "params" => %{"command" => command, "cwd" => if(outside_workspace?, do: test_root, else: workspace), "reason" => "negative diagnostic"}})}' 
+              ;;
+            *)
+              sleep 1
+              ;;
+          esac
+        done
+        """)
+
+        File.chmod!(codex_binary, 0o755)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server",
+          codex_approval_policy: "on-request"
+        )
+
+        issue = %Issue{
+          id: "173",
+          identifier: "GH-173",
+          title: "Carla worker diagnostic",
+          description: "Reject admin command",
+          state: "open",
+          url: "https://github.com/rede-industrial/frota-control-center/issues/173",
+          labels: ["symphony-safe-pilot-20260911", "capability:backend-engineering"]
+        }
+
+        assert {:error, {:approval_required, payload}} =
+                 AppServer.run(workspace, "Run diagnostics", issue)
+
+        assert get_in(payload, ["params", "command"]) == command
+      after
+        File.rm_rf(test_root)
+      end
+    end
+  end
+
   test "app server auto-approves command execution approval requests when approval policy is never" do
     test_root =
       Path.join(

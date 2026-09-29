@@ -89,8 +89,6 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp remote_windows_pilot?(_worker_host), do: false
 
-  defp windows_worker_platform?(platform) when platform in [:windows, :windows_cmd], do: true
-
   defp windows_worker_platform?(platform) when is_binary(platform) do
     platform
     |> String.trim()

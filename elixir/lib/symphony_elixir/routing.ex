@@ -28,7 +28,7 @@ defmodule SymphonyElixir.Routing do
     end
   end
 
-  @spec route_table() :: {:ok, map()} | {:error, term()}
+  @spec route_table() :: {:ok, map() | nil} | {:error, term()}
   def route_table do
     path = canonical_file_path()
 

@@ -403,3 +403,8 @@ you.
 ## License
 
 This project is licensed under the [Apache License 2.0](../LICENSE).
+
+## Restricted Windows admission candidate
+
+See [Fase 0 evidence and remaining gates](docs/fase0-worker-admission-20260929.md).
+Local protocol tests do not authorize live worker admission. Preserve on-request and workspace-write; review the candidate before any runtime change.

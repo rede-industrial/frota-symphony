@@ -377,8 +377,6 @@ defmodule SymphonyElixir.Config.Schema do
       if String.trim(value) != "", do: [], else: [worker_host: "can't be blank"]
     end
 
-    defp validate_worker_host(:worker_host, _value), do: [worker_host: "can't be blank"]
-
     defp normalize_tokens(values) when is_list(values) do
       values
       |> Enum.map(&(to_string(&1) |> String.trim()))
@@ -524,10 +522,10 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp validate_optional_positive(changeset, field) do
       validate_change(changeset, field, fn ^field, value ->
-        cond do
-          is_nil(value) -> []
-          is_integer(value) and value > 0 -> []
-          true -> [{field, "must be a positive integer when configured"}]
+        if is_integer(value) and value > 0 do
+          []
+        else
+          [{field, "must be a positive integer when configured"}]
         end
       end)
     end

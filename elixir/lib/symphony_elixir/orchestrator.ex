@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Orchestrator do
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
+      completed_history: %{},
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
@@ -213,16 +214,7 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue: running_entry.issue,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+      persist_agent_completion(state, issue_id, running_entry, session_id)
     end
   end
 
@@ -1158,6 +1150,141 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp complete_issue(%State{} = state, issue_id, completion, receipt) do
+    completed_entry =
+      completion
+      |> Map.put(:issue_id, issue_id)
+      |> Map.put(:tracker_receipt, receipt)
+      |> Map.put(:completed_at, DateTime.utc_now())
+
+    state
+    |> complete_issue(issue_id)
+    |> Map.update!(:completed_history, &Map.put(&1, issue_id, completed_entry))
+    |> record_audit_event(:issue_completed, %{
+      issue_id: issue_id,
+      identifier: completion[:identifier],
+      delivery_status: completion[:delivery_status],
+      terminal_transition: completion[:terminal_transition]
+    })
+  end
+
+  defp persist_agent_completion(%State{} = state, issue_id, running_entry, session_id) do
+    completion = completion_payload(issue_id, running_entry, session_id)
+
+    case Tracker.persist_completion(running_entry.issue, completion) do
+      {:ok, receipt} ->
+        Logger.info(
+          "Completion persisted for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id} delivery_status=#{completion.delivery_status} terminal_transition=#{completion.terminal_transition}"
+        )
+
+        complete_issue(state, issue_id, completion, receipt)
+
+      {:error, reason} ->
+        error = "completion persistence failed: #{inspect(reason)}"
+
+        Logger.error("Completion persistence failed for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{inspect(reason)}")
+
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp completion_payload(issue_id, running_entry, session_id) do
+    issue = Map.get(running_entry, :issue)
+    delivery_status = delivery_status_for_completion(issue, running_entry)
+
+    %{
+      issue_id: issue_id,
+      identifier: Map.get(running_entry, :identifier, issue_id),
+      result: result_for_delivery_status(delivery_status),
+      delivery_status: delivery_status,
+      terminal_transition: terminal_transition_for_delivery_status(delivery_status),
+      session_id: session_id,
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      capability: capability_for_issue(issue),
+      evidence: completion_evidence(running_entry)
+    }
+  end
+
+  defp delivery_status_for_completion(%Issue{} = issue, running_entry) do
+    cond do
+      code_delivery_issue?(issue) and code_delivery_evidence?(running_entry) ->
+        "SUCCESS"
+
+      read_only_delivery_issue?(issue) and textual_delivery_evidence?(running_entry) ->
+        "SUCCESS"
+
+      textual_delivery_evidence?(running_entry) ->
+        "DELIVERY_INCOMPLETE"
+
+      true ->
+        "DELIVERY_INCOMPLETE"
+    end
+  end
+
+  defp delivery_status_for_completion(_issue, running_entry) do
+    if textual_delivery_evidence?(running_entry), do: "DELIVERY_INCOMPLETE", else: "DELIVERY_INCOMPLETE"
+  end
+
+  defp result_for_delivery_status("SUCCESS"), do: "SUCCESS"
+  defp result_for_delivery_status("DELIVERY_INCOMPLETE"), do: "SUCCESS_WITH_INSUFFICIENT_EVIDENCE"
+  defp result_for_delivery_status(status), do: status
+
+  defp terminal_transition_for_delivery_status("SUCCESS"), do: "closed"
+  defp terminal_transition_for_delivery_status(_status), do: "none"
+
+  defp completion_evidence(running_entry) do
+    %{
+      issue_url: running_entry.issue.url,
+      workspace_path: Map.get(running_entry, :workspace_path),
+      last_event: Map.get(running_entry, :last_codex_event),
+      last_message: summarize_completion_message(Map.get(running_entry, :last_codex_message)),
+      input_tokens: Map.get(running_entry, :codex_input_tokens, 0),
+      output_tokens: Map.get(running_entry, :codex_output_tokens, 0),
+      total_tokens: Map.get(running_entry, :codex_total_tokens, 0)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == "" end)
+    |> Map.new()
+  end
+
+  defp textual_delivery_evidence?(running_entry) do
+    running_entry
+    |> completion_evidence()
+    |> Map.has_key?(:last_message)
+  end
+
+  defp code_delivery_evidence?(running_entry) do
+    evidence = completion_evidence(running_entry)
+
+    Enum.any?([:commit, :branch, :pr, :pull_request], &Map.has_key?(evidence, &1))
+  end
+
+  defp read_only_delivery_issue?(%Issue{} = issue) do
+    capability_for_issue(issue) in ["SYSTEM_ANALYSIS", "ARCHITECTURE", "QUALITY_ENGINEERING"]
+  end
+
+  defp code_delivery_issue?(%Issue{} = issue), do: not read_only_delivery_issue?(issue)
+
+  defp capability_for_issue(%Issue{labels: labels}) do
+    labels
+    |> List.wrap()
+    |> Enum.find_value(fn
+      "capability:" <> capability -> normalize_capability(capability)
+      _ -> nil
+    end)
+  end
+
+  defp capability_for_issue(_issue), do: nil
+
+  defp summarize_completion_message(nil), do: nil
+
+  defp summarize_completion_message(message) do
+    message
+    |> inspect(limit: 20, printable_limit: 1_000)
+    |> String.slice(0, 2_000)
+  end
+
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     if pilot_ignore_retries?() do
@@ -1479,8 +1606,6 @@ defmodule SymphonyElixir.Orchestrator do
         :closed
     end
   end
-
-  defp finops_circuit_open?(_state, _issue, _attempt), do: :closed
 
   defp finops_guard_has_explicit_limit?(guard) do
     [
@@ -1873,11 +1998,36 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    completed =
+      state.completed_history
+      |> Map.values()
+      |> Enum.map(fn metadata ->
+        %{
+          issue_id: metadata.issue_id,
+          identifier: Map.get(metadata, :identifier),
+          result: Map.get(metadata, :result),
+          delivery_status: Map.get(metadata, :delivery_status),
+          terminal_transition: Map.get(metadata, :terminal_transition),
+          session_id: Map.get(metadata, :session_id),
+          turn_count: Map.get(metadata, :turn_count),
+          worker_host: Map.get(metadata, :worker_host),
+          workspace_path: Map.get(metadata, :workspace_path),
+          capability: Map.get(metadata, :capability),
+          completed_at: Map.get(metadata, :completed_at),
+          last_codex_timestamp: Map.get(metadata, :last_codex_timestamp),
+          last_codex_message: Map.get(metadata, :last_codex_message),
+          last_codex_event: Map.get(metadata, :last_codex_event),
+          evidence: Map.get(metadata, :evidence),
+          tracker_receipt: Map.get(metadata, :tracker_receipt)
+        }
+      end)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
        blocked: blocked,
+       completed: completed,
        finops_circuit: state.finops_circuit,
        audit_events: state.audit_events,
        codex_totals: state.codex_totals,

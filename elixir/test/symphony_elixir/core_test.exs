@@ -1503,7 +1503,7 @@ defmodule SymphonyElixir.CoreTest do
              AgentRunner.continue_with_issue_for_test(issue, fetcher)
   end
 
-  test "normal worker exit schedules active-state continuation retry" do
+  test "normal worker exit blocks fail-closed when completion persistence is unsupported" do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
@@ -1537,10 +1537,10 @@ defmodule SymphonyElixir.CoreTest do
     state = :sys.get_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
-    assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
-    assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    refute MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert state.blocked[issue_id].error =~ "completion persistence failed"
+    assert state.blocked[issue_id].error =~ "completion_persistence_not_supported"
   end
 
   test "abnormal worker exit increments retry attempt progressively" do

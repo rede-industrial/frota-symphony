@@ -1170,6 +1170,192 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
+  test "orchestrator persists successful read-only completions and exposes completed history" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["open"],
+      tracker_terminal_states: ["closed"]
+    )
+
+    issue_id = "900"
+    process_ref = make_ref()
+    now = DateTime.utc_now()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "GH-900",
+      title: "Completion contract pilot",
+      description: "Validate completion persistence",
+      state: "open",
+      url: "https://github.test/octo/repo/issues/900",
+      labels: ["capability:system-analysis"],
+      dispatchable: true
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :CompletionHistoryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: "norma",
+      workspace_path: "/tmp/symphony/GH-900",
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: now
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:codex_worker_update, issue_id, %{event: :session_started, session_id: "session-900", timestamp: now}})
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{method: "agent/message", text: "Read-only delivery complete."},
+         timestamp: now
+       }}
+    )
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+
+    state = :sys.get_state(pid)
+    completion = state.completed_history[issue_id]
+
+    assert MapSet.member?(state.completed, issue_id)
+    assert completion.identifier == "GH-900"
+    assert completion.result == "SUCCESS"
+    assert completion.delivery_status == "SUCCESS"
+    assert completion.terminal_transition == "closed"
+    assert completion.session_id == "session-900"
+    assert completion.worker_host == "norma"
+    assert completion.capability == "SYSTEM_ANALYSIS"
+    assert completion.tracker_receipt.terminal_transition == "closed"
+    assert state.blocked == %{}
+    assert state.retry_attempts == %{}
+
+    assert [%{issue_id: "900", completion: persisted_completion}] =
+             Application.get_env(:symphony_elixir, :memory_tracker_completions)
+
+    assert persisted_completion[:identifier] == "GH-900"
+    assert persisted_completion[:terminal_transition] == "closed"
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{completed: [completed_snapshot]} = snapshot
+    assert completed_snapshot.identifier == "GH-900"
+    assert completed_snapshot.delivery_status == "SUCCESS"
+
+    assert {:ok, issue_payload} =
+             SymphonyElixirWeb.Presenter.issue_payload("GH-900", orchestrator_name, 1_000)
+
+    assert issue_payload.status == "completed"
+    assert issue_payload.completed.delivery_status == "SUCCESS"
+    assert issue_payload.completed.terminal_transition == "closed"
+  end
+
+  test "orchestrator blocks completion fail-closed when tracker persistence fails" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["open"],
+      tracker_terminal_states: ["closed"]
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_completion_fail, true)
+
+    issue_id = "901"
+    process_ref = make_ref()
+    now = DateTime.utc_now()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "GH-901",
+      title: "Completion failure",
+      description: "Validate fail closed",
+      state: "open",
+      url: "https://github.test/octo/repo/issues/901",
+      labels: ["capability:system-analysis"],
+      dispatchable: true
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :CompletionFailClosedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: "norma",
+      workspace_path: "/tmp/symphony/GH-901",
+      session_id: "session-901",
+      turn_count: 1,
+      last_codex_message: %{event: :notification, message: %{text: "done"}, timestamp: now},
+      last_codex_timestamp: now,
+      last_codex_event: :notification,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: now
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.completed, issue_id)
+    assert state.completed_history == %{}
+    assert state.retry_attempts == %{}
+    assert state.blocked[issue_id].error =~ "completion persistence failed"
+    assert Application.get_env(:symphony_elixir, :memory_tracker_completions, []) == []
+  end
+
   test "status dashboard renders offline marker to terminal" do
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->

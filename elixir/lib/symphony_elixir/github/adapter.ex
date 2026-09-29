@@ -35,6 +35,11 @@ defmodule SymphonyElixir.GitHub.Adapter do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids), do: client_module().fetch_issues_by_ids(issue_ids)
 
+  @spec persist_completion(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def persist_completion(%Issue{} = issue, completion) when is_map(completion) do
+    client_module().persist_completion(issue, completion)
+  end
+
   @spec agent_tool_specs() :: [map()]
   def agent_tool_specs, do: AgentTool.tool_specs()
 
