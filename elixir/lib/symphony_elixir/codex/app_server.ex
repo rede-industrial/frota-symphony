@@ -1040,7 +1040,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp unwrap_cmd_shell(command) do
     command
     |> String.trim()
-    |> String.replace(~r/^cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+/i, "")
+    |> String.replace(
+      ~r{^(?:cmd(?:\.exe)?|"[^"]*[\\/]cmd(?:\.exe)?")\s+(?:/d\s+)?(?:/s\s+)?/c\s+}i,
+      ""
+    )
     |> trim_wrapping_quotes()
   end
 

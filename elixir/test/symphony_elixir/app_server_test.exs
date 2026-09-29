@@ -593,7 +593,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-173"}}}'
-            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"cmd.exe /c hostname","cwd":"#{workspace}","reason":"diagnostic"}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"\\\"C:\\\\Windows\\\\System32\\\\cmd.exe\\\" /c hostname","cwd":"#{workspace}","reason":"diagnostic"}}'
             ;;
           5)
             printf '%s\\n' '{"method":"turn/completed"}'
