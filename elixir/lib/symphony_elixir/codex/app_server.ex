@@ -107,7 +107,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, workspace) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -504,22 +504,40 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, workspace) do
     receive_loop(
       port,
       on_message,
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      %{workspace: workspace}
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests,
+         approval_context
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          approval_context
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -528,7 +546,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          approval_context
         )
 
       {^port, {:exit_status, status}} ->
@@ -539,7 +558,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(
+         port,
+         on_message,
+         data,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         approval_context
+       ) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -581,7 +608,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          approval_context
         )
 
       {:ok, payload} ->
@@ -595,7 +623,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          approval_context
+        )
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -612,7 +648,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          approval_context
+        )
     end
   end
 
@@ -637,7 +681,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         approval_context
        ) do
     metadata = metadata_from_message(port, payload)
 
@@ -649,7 +694,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            on_message,
            metadata,
            tool_executor,
-           auto_approve_requests
+           auto_approve_requests,
+           approval_context
          ) do
       :input_required ->
         emit_message(
@@ -662,7 +708,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          approval_context
+        )
 
       :approval_required ->
         emit_message(
@@ -696,7 +750,16 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
+          receive_loop(
+            port,
+            on_message,
+            timeout_ms,
+            "",
+            tool_executor,
+            auto_approve_requests,
+            approval_context
+          )
         end
     end
   end
@@ -709,8 +772,12 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         approval_context
        ) do
+    allow_request? =
+      auto_approve_requests or workspace_diagnostic_command_approval?(payload, approval_context)
+
     approve_or_require(
       port,
       id,
@@ -719,7 +786,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      allow_request?
     )
   end
 
@@ -731,7 +798,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          tool_executor,
-         _auto_approve_requests
+         _auto_approve_requests,
+         _approval_context
        ) do
     tool_name = tool_call_name(params)
     arguments = tool_call_arguments(params)
@@ -766,7 +834,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         _approval_context
        ) do
     approve_or_require(
       port,
@@ -788,7 +857,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         _approval_context
        ) do
     approve_or_require(
       port,
@@ -810,7 +880,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         _approval_context
        ) do
     approve_or_require(
       port,
@@ -832,7 +903,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         _approval_context
        ) do
     maybe_auto_answer_tool_request_user_input(
       port,
@@ -854,7 +926,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          _on_message,
          _metadata,
          _tool_executor,
-         _auto_approve_requests
+         _auto_approve_requests,
+         _approval_context
        ) do
     :unhandled
   end
@@ -930,6 +1003,64 @@ defmodule SymphonyElixir.Codex.AppServer do
          false
        ) do
     :approval_required
+  end
+
+  defp workspace_diagnostic_command_approval?(
+         %{"params" => %{"command" => command, "cwd" => cwd}},
+         %{workspace: workspace}
+       )
+       when is_binary(command) and is_binary(cwd) and is_binary(workspace) do
+    same_workspace?(cwd, workspace) and diagnostic_command?(command)
+  end
+
+  defp workspace_diagnostic_command_approval?(_payload, _approval_context), do: false
+
+  defp same_workspace?(cwd, workspace) do
+    normalize_approval_path(cwd) == normalize_approval_path(workspace)
+  end
+
+  defp normalize_approval_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.trim_trailing("/")
+    |> String.trim_trailing("\\")
+    |> String.downcase()
+  end
+
+  defp diagnostic_command?(command) when is_binary(command) do
+    command
+    |> unwrap_cmd_shell()
+    |> normalize_diagnostic_command()
+    |> case do
+      command when command in ["hostname", "whoami", "cd", "git status --short --branch"] -> true
+      _ -> false
+    end
+  end
+
+  defp unwrap_cmd_shell(command) do
+    command
+    |> String.trim()
+    |> String.replace(~r/^cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+/i, "")
+    |> trim_wrapping_quotes()
+  end
+
+  defp trim_wrapping_quotes(command) do
+    trimmed = String.trim(command)
+
+    if String.starts_with?(trimmed, "\"") and String.ends_with?(trimmed, "\"") and String.length(trimmed) >= 2 do
+      trimmed
+      |> String.slice(1..-2//1)
+      |> String.trim()
+    else
+      trimmed
+    end
+  end
+
+  defp normalize_diagnostic_command(command) do
+    command
+    |> String.trim()
+    |> String.replace(~r/\s+/, " ")
+    |> String.downcase()
   end
 
   defp maybe_auto_answer_tool_request_user_input(
