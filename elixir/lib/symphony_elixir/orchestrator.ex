@@ -1607,8 +1607,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp finops_circuit_open?(_state, _issue, _attempt), do: :closed
-
   defp finops_guard_has_explicit_limit?(guard) do
     [
       guard.max_observed_tokens,
