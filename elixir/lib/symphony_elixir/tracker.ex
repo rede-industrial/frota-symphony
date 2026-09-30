@@ -21,12 +21,14 @@ defmodule SymphonyElixir.Tracker do
 
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   @callback fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  @callback persist_completion(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
   @callback validate_config(map()) :: :ok | {:error, term()}
 
-  @optional_callbacks agent_tool_specs: 0,
+  @optional_callbacks persist_completion: 2,
+                      agent_tool_specs: 0,
                       execute_agent_tool: 3,
                       validate_config: 1
 
@@ -38,6 +40,17 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @spec persist_completion(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def persist_completion(%Issue{} = issue, completion) when is_map(completion) do
+    adapter = adapter()
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :persist_completion, 2) do
+      adapter.persist_completion(issue, completion)
+    else
+      {:error, {:completion_persistence_not_supported, Config.settings!().tracker.kind}}
+    end
   end
 
   @doc """

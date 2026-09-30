@@ -7,7 +7,12 @@ defmodule SymphonyElixir.Routing do
   @type decision ::
           {:ok, String.t()}
           | :local_allowed
-          | {:error, :unknown_capability | :ambiguous_capability | :missing_destination | :unknown_worker | :invalid_route_table}
+          | {:error,
+             :unknown_capability
+             | :ambiguous_capability
+             | :missing_destination
+             | :unknown_worker
+             | :invalid_route_table}
 
   @spec worker_for_issue(Issue.t()) :: decision()
   def worker_for_issue(%Issue{} = issue) do
@@ -23,7 +28,7 @@ defmodule SymphonyElixir.Routing do
     end
   end
 
-  @spec route_table() :: {:ok, map()} | {:error, term()}
+  @spec route_table() :: {:ok, map() | nil} | {:error, term()}
   def route_table do
     path = canonical_file_path()
 

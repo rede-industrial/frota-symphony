@@ -20,6 +20,9 @@
 /log/
 /logs/
 
+# Runtime/test generated workflow safety snapshot.
+WORKFLOW.last-known-good
+
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
 
